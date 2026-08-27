@@ -9,6 +9,7 @@ venv/
 vision/out/*.mp4
 vision/out/*.avi
 vision/out/*.npy
+vision/out/*.png
 vision/out/davis/*
 vision/out/results/*
 

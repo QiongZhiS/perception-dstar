@@ -477,6 +477,25 @@ def flips(oks, segs, seg="rest"):
     return sum(1 for a, b in zip(sub, sub[1:]) if a != b)
 
 
+def serialize_trace(trace):
+    """逐帧 trace → JSON 安全 dict（docs/221 A5：逐帧 trace 成为 JSON 工件）。
+    trace 条目 = (i, seg, frac, hue, ok, claimed, thr, k, gate_s)；
+    gate_s = (open, d_mu, prev) 或 None。"""
+    out = []
+    for i, seg, frac, hue, ok, claimed, t, k, gs in trace:
+        e = {"f": int(i), "seg": str(seg), "frac": round(float(frac), 4),
+             "hue": None if hue is None else round(float(hue), 3),
+             "ok": int(ok), "claimed": int(claimed),
+             "thr": None if t is None else round(float(t), 4),
+             "k": int(k)}
+        if gs is not None:
+            e["gate"] = [int(gs[0]),
+                         None if gs[1] is None else round(float(gs[1]), 4),
+                         None if gs[2] is None else round(float(gs[2]), 3)]
+        out.append(e)
+    return out
+
+
 def verify_a1():
     """docs/221 A1 验证：色相分箱后 bw 为真带宽（原按浮点键记账 → 恒 0 退化）。
     漂移中心取 bin 中心（175°，bin[170,180) 内）→ bin 内 std 完整；
@@ -527,6 +546,9 @@ def main():
                     help="base,dusk,corrupt,rest 帧数")
     ap.add_argument("--thr", type=float, default=0.60,
                     help="确认阈值基线（真实目标确认余量不同：flamingo 0.60/surf 0.40）")
+    ap.add_argument("--seed", type=int, default=7,
+                    help="序列构造随机种子（docs/221 A2：多种子统计外壳传不同 seed；"
+                         "默认 7 保持 docs/219 数字可复现）")
     ap.add_argument("--corrupt", default="gain", choices=["gain", "noise"],
                     help="他者的不的注入方式：gain=温和色相偏移 / noise=目标区强噪声")
     ap.add_argument("--verify-a1", action="store_true", help="只跑 A1 带宽修复验证")
@@ -560,7 +582,7 @@ def main():
     print(f"== 类别级怀疑系统回真实图像：{args.video}（任务色相 {task_hue:.1f}°）==")
 
     seq_f, seq_m, seq_s, seq_gt = build_sequence(frames, masks, seg_len,
-                                                 corrupt=args.corrupt)
+                                                 seed=args.seed, corrupt=args.corrupt)
     n_empty = sum(1 for m in seq_m if m.max() == 0)
     n_pos = sum(seq_gt)
     print(f"序列 {len(seq_f)} 帧（base/dusk/corrupt/rest 段；rest 前 8 帧混 4 假恢复），"
@@ -605,7 +627,7 @@ def main():
     if args.json:
         os.makedirs(os.path.dirname(args.json) or ".", exist_ok=True)
         out = {"video": args.video, "task_hue": task_hue, "thr": args.thr,
-               "corrupt": args.corrupt, "seg": seg_len,
+               "seed": args.seed, "corrupt": args.corrupt, "seg": seg_len,
                "gt": {"n_pos": int(n_pos), "n_total": len(seq_gt),
                       "n_empty": int(n_empty)},
                "variants": {}}
@@ -615,7 +637,8 @@ def main():
                 "f1": round(m["f1"], 4), "tp": m["tp"], "tn": m["tn"],
                 "fp": m["fp"], "fn": m["fn"], "flips": int(flips(oks, seq_s)),
                 "seg_rates": {k: round(v, 4) for k, v in seg_r.items()},
-                "n_corr": int(corr)}
+                "n_corr": int(corr),
+                "trace": serialize_trace(trace)}   # docs/221 A5 逐帧 trace 工件
         with open(args.json, "w", encoding="utf-8") as f:
             json.dump(out, f, ensure_ascii=False, indent=1)
         print(f"\n结果归档: {args.json}")
