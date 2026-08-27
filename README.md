@@ -1,9 +1,12 @@
 # Perception d\* — 感知的 d\* 纲领
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22128266.svg)](https://doi.org/10.5281/zenodo.22128266)
+
 > 从事件流到"被看见"：一个不靠识别、不靠大模型的感知架构，逐层机制化。
 >
 > 项目创建：2026-08 ｜ 状态：**视觉线第一段闭环完成（docs/177-201，六层阶梯 1-5 层机制化 + 第 6 层第一物证）**。
 > 上级仓库：[synthetic-life](https://github.com/QiongZhiS/From-zero-to-a-being-that-sets-its-own-goals)（生命主体叙事与立场）；本仓库是它的感知证据线，独立演化。
+> 存档：v0.1.0 @ Zenodo（DOI: 10.5281/zenodo.22128266）
 
 ---
 
