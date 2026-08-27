@@ -137,8 +137,10 @@ python keep_reject_open.py        # 实验 6b：守住 vs 改判
 python keep_reject_continuous.py  # 实验 6c：连续失败率 P3
 ```
 
-DAVIS 数据：下载 [DAVIS](https://davischallenge.org/) 后放 `out/davis/`（脚本内路径
-见各文件头部）。toy 实验（1a/2-toy/6）完全无外部依赖。
+DAVIS 数据：下载 [DAVIS](https://davischallenge.org/) 后放 `out/davis/`，或运行
+`python davis_setup.py` 自动下载抽取；已有数据在其他位置时用 `--davis <目录>` 指向
+（如 `python davis_suspicious.py --davis C:\path\to\synthetic-life\vision\out\davis`）。
+toy 实验（1a/2-toy/6）完全无外部依赖。
 
 ## 边界纪律（docs/63）
 

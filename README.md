@@ -4,7 +4,7 @@
 
 > 从事件流到"被看见"：一个不靠识别、不靠大模型的感知架构，逐层机制化。
 >
-> 项目创建：2026-08 ｜ 状态：**视觉线第一段闭环完成（docs/177-201，六层阶梯 1-5 层机制化 + 第 6 层第一物证）**。
+> 项目创建：2026-08 ｜ 状态：**视觉线闭环完成（docs/177-220）：六层阶梯 1-5 层机制化 + 第 6 层"被看见"物证 + 类别级怀疑系统 + 真实图像验证（DAVIS）+ 可交互演示**。
 > 上级仓库：[synthetic-life](https://github.com/QiongZhiS/From-zero-to-a-being-that-sets-its-own-goals)（生命主体叙事与立场）；本仓库是它的感知证据线，独立演化。
 > 存档：v0.1.0 @ Zenodo（DOI: 10.5281/zenodo.22128266）
 
@@ -42,6 +42,9 @@
 | 4 | 视觉态势闭环 | 外赋目标→态势→地图→行为：map_frac 1.00、追上移动目标 | `vision/situation.py` | docs/189 |
 | 5 | 颜色恒常判据 | "何时校正"=MAD×帧间\|Δ\|；DAVIS 6 视频噪声全关、渐变全开 | `vision/davis_constancy.py` | docs/199/199b |
 | 6 | 拒绝的历史 | 吸收漂移 120°（自我被重写）vs 保留守住 + 纪念加深（r=0.999） | `vision/keep_reject*.py` | docs/200/201 |
+| 7 | 类别级怀疑系统 | suspicious 表 × 自适应带宽 × 连续加权 × 分层衰减（疑窄严宽） | `vision/experience_categories.py` 等 | docs/205-216 |
+| 8 | **真实图像验证** | 整条机制链上 DAVIS 真实目标（flamingo/surf），标准 P/R/F1 + 7 变体基线对照 | `vision/davis_suspicious.py` | docs/219/220 |
+| 9 | 可交互演示 | 浏览器可见"它在看什么/维持什么/怀疑什么/怎么说" | `vision/demo_app.py` | docs/217 |
 
 ## 快速开始
 
@@ -53,6 +56,8 @@ python topk_experiment.py   # 实验 3：Top-K 威胁度（需要 DAVIS 视频�
 python keep_reject.py       # 实验 6a：拒绝的历史（纯本地 toy，无依赖）
 python keep_reject_open.py  # 实验 6b：守住 vs 改判（开放端）
 python keep_reject_continuous.py  # 实验 6c：连续失败率下 P3 单调性
+python davis_suspicious.py  # 实验 8：类别级怀疑系统回真实图像（标准 P/R/F1，需 DAVIS）
+python demo_app.py --port 8080  # 实验 9：可交互演示（浏览器 http://127.0.0.1:8080）
 ```
 
 依赖：Python 3.11 + numpy + opencv-python。toy 实验（1/2/6）无外部数据；DAVIS 实验（3/4/5）需下载 [DAVIS 数据集](https://davischallenge.org/)（见 `vision/README.md`）。
@@ -79,9 +84,10 @@ perception-dstar/
 
 ## 路线图
 
-- 视觉线（当前）：第一段闭环 ✅ → DAVIS 多视频验证 → 跟踪闭环误差传播
-- 听觉线（未来）：六层阶梯第二模态（docs/202+）
+- 视觉线：转导闭环 ✅ → 类别级怀疑系统 ✅ → 真实图像验证（DAVIS P/R/F1）✅ → 可交互演示 ✅ → 多目标/记忆持久化（docs/220 未完成 1-3）
+- 听觉线（未来）：六层阶梯第二模态（docs/221+）
 - core（未来）：跨模态共享件——利害外置、Top-K 威胁度、否定注册、态势地图
+- 论文：docs/180/181 骨架 + docs/219（标准度量/基线/文献划界）→ 全文
 
 ## 一句话
 
