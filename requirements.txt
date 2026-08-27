@@ -1,0 +1,6 @@
+# docs/221 A5 可复现性资产：本线（docs/178 第 6 层视觉机制链）依赖
+# 验证环境：Python 3.11 + Windows（其他平台 numpy/opencv 换源即可）
+numpy>=1.24
+opencv-python>=4.8
+# 仅 davis_setup.py 下载/解压 DAVIS 2017 trainval 用（std lib urllib/zipfile，无需额外）
+# imageio-ffmpeg 为 docs/182 视频线遗留依赖（本线实验不强制）

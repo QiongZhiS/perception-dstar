@@ -61,8 +61,12 @@ def main():
     ap.add_argument("--video", default="flamingo")
     ap.add_argument("--all", action="store_true")
     args = ap.parse_args()
-    videos = ["blackswan", "car-turn", "flamingo", "motorbike", "soccerball", "surf"] \
-        if args.all else [args.video]
+    if args.all:
+        import json
+        with open(os.path.join(DAVIS, "manifest.json"), encoding="utf-8") as f:
+            videos = sorted(json.load(f).keys())
+    else:
+        videos = [args.video]
     for v in videos:
         target_stats(v)
 

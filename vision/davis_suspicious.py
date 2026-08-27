@@ -45,6 +45,7 @@ docs/218 缺口 1（致命）：docs/205-216 整条"阅历"进化链全是色相
   python vision/davis_suspicious.py --video surf --seg 14,12,10,19 --thr 0.40 --corrupt noise
 """
 import argparse
+import json
 import os
 import sys
 
@@ -56,6 +57,7 @@ import cv2  # noqa: E402
 DAVIS = os.path.join("vision", "out", "davis")
 N_SEG = {"base": 20, "dusk": 20, "corrupt": 15, "rest": 25}   # flamingo 80 帧
 SAT_MIN_TARGET, SAT_MIN_BG = 60, 60
+HUE_BIN = 10.0        # 色相分箱（docs/221 A1：bin=10°，bin 内 std 为真带宽）
 
 
 def circ(a, b):
@@ -65,11 +67,6 @@ def circ(a, b):
 
 def load_video(video):
     vdir = os.path.join(DAVIS, video)
-    if not os.path.isdir(vdir):
-        raise FileNotFoundError(
-            f"DAVIS 数据未找到: {vdir}\n"
-            f"请先运行 vision/davis_setup.py 下载抽取，或用 --davis <目录> 指向"
-            f"已有的 DAVIS 数据（如 synthetic-life 的 vision/out/davis）。")
     jpgs = sorted(f for f in os.listdir(vdir) if f.endswith(".jpg"))
     pngs = sorted(f for f in os.listdir(vdir) if f.endswith(".png"))
     frames, masks = [], []
@@ -84,7 +81,8 @@ def warm_gain(k, sat=1.0):
     return np.array([1 - sat * k, 1.0, 1 + 0.8 * sat * k])
 
 
-def build_sequence(frames, masks, seg_len, seed=7, corrupt="gain"):
+def build_sequence(frames, masks, seg_len, seed=7, corrupt="gain",
+                   noise_std=10.0, corrupt_kc=0.05):
     """按段构造序列：真实帧 + 受控扰动。返回 (帧, 掩码, 段标签, 逐帧GT)。
 
     段语义（docs/178 两种否定的真实版）：
@@ -93,10 +91,12 @@ def build_sequence(frames, masks, seg_len, seed=7, corrupt="gain"):
       corrupt 目标区颜色变化（他者的不）        → 确认退化→被拒→suspicious 沉积
       rest    真实帧 + 假恢复帧                → 带纪念重信任（docs/200）；rest 段
                前 8 帧混入 4 帧 corrupt（目标"看似恢复实则仍错"）→ 验证"不轻信"
-    全图轻噪声（std 10）加在 base/dusk/rest：世界噪声（docs/101 固执，不误改判）。
+    全图轻噪声（std=noise_std）加在 base/dusk/rest：世界噪声（docs/101 固执）。
     corrupt 方式：
-      gain  温和冷增益（目标色相漂移 ~15-25°，记账 hue 接近目标——带宽实验需要）
-      noise 目标区强噪声（目标观测全毁，记账 hue 乱——目标消失/破坏验证需要）
+      gain  温和冷增益（强度 corrupt_kc；目标色相漂移，记账 hue 接近目标）
+      noise 目标区强噪声（目标观测全毁，记账 hue 乱）
+    扰动强度参数化（docs/221 A2 多种子统计）：noise_std/corrupt_kc 由统计外壳按
+    seed 采样——不同种子=不同扰动强度，结果才有真实方差（默认值保持 docs/219 数字）。
     GT：正=目标在场且颜色真实正确（base/dusk/rest 的 clean 帧）；负=corrupt 段 +
         rest 段的假恢复帧（他者的不）。dusk 是光照（世界变化）不是颜色变化 → 正。
     """
@@ -120,12 +120,11 @@ def build_sequence(frames, masks, seg_len, seed=7, corrupt="gain"):
             src = np.clip(src.astype(np.float32) * warm_gain(k), 0, 255).astype(np.uint8)
         elif seg == "corrupt":
             gt = 0
-            n = rng.normal(0, 10, src.shape).astype(np.int16)
+            n = rng.normal(0, noise_std, src.shape).astype(np.int16)
             src = np.clip(src.astype(np.int16) + n, 0, 255).astype(np.uint8)
             if mask.max() > 0:
                 if corrupt == "gain":
-                    kc = 0.05                      # 温和冷增益（局部色温变化 ~15-25°）
-                    g = np.array([1 + 0.9 * kc, 1.0, 1 - 0.9 * kc])
+                    g = np.array([1 + 0.9 * corrupt_kc, 1.0, 1 - 0.9 * corrupt_kc])
                     src = src.astype(np.float32)
                     src[mask > 0] *= g
                     src = np.clip(src, 0, 255).astype(np.uint8)
@@ -138,11 +137,11 @@ def build_sequence(frames, masks, seg_len, seed=7, corrupt="gain"):
             k_rest = rest_i.index(i)
             if k_rest < 8 and k_rest % 2 == 1:
                 gt = 0
-                n = rng.normal(0, 10, src.shape).astype(np.int16)
+                n = rng.normal(0, noise_std, src.shape).astype(np.int16)
                 src = np.clip(src.astype(np.int16) + n, 0, 255).astype(np.uint8)
                 if mask.max() > 0:
                     if corrupt == "gain":
-                        g = np.array([1 + 0.9 * 0.05, 1.0, 1 - 0.9 * 0.05])
+                        g = np.array([1 + 0.9 * corrupt_kc, 1.0, 1 - 0.9 * corrupt_kc])
                         src = src.astype(np.float32)
                         src[mask > 0] *= g
                         src = np.clip(src, 0, 255).astype(np.uint8)
@@ -151,10 +150,10 @@ def build_sequence(frames, masks, seg_len, seed=7, corrupt="gain"):
                         src = np.clip(src.astype(np.int16) + n2 * (mask > 0)[:, :, None],
                                       0, 255).astype(np.uint8)
             else:
-                n = rng.normal(0, 10, src.shape).astype(np.int16)
+                n = rng.normal(0, noise_std, src.shape).astype(np.int16)
                 src = np.clip(src.astype(np.int16) + n, 0, 255).astype(np.uint8)
         else:
-            n = rng.normal(0, 10, src.shape).astype(np.int16)
+            n = rng.normal(0, noise_std, src.shape).astype(np.int16)
             src = np.clip(src.astype(np.int16) + n, 0, 255).astype(np.uint8)
         out_f.append(src)
         out_m.append(mask)
@@ -234,42 +233,41 @@ class DavisMind:
     def __init__(self, task_hue, wb=True, global_thr=False, fixed_bw=None,
                  template=False, k_band=2.0, thr_base=0.60, thr_boost=0.04,
                  thr_cap=0.85, relax=0.02, persist_for=3, grow=3.0, cap_k=60,
-                 bin_size=10.0):
+                 layered_k=False):
         self.task_hue = task_hue
         self.wb, self.global_thr, self.template = wb, global_thr, template
         self.fixed_bw = fixed_bw
+        self.layered_k = layered_k         # docs/221 A1：k 侧分层衰减接线（默认关，保持 docs/219 数字）
         self.k_band = k_band
         self.thr_base, self.thr_boost, self.thr_cap = thr_base, thr_boost, thr_cap
         self.relax, self.persist_for, self.grow, self.cap_k = relax, persist_for, grow, cap_k
         self.thr_cur = thr_base               # global/template 用
-        self.rejected = {}                    # suspicious[hue_bin] = 被拒累计（docs/205）
+        self.rejected = {}                    # suspicious[hue] = 被拒累计（docs/205）
         self.rej_total = 0                    # 总被拒帧（docs/200 纪念）
-        self.thr_by = {}                      # 类别级阈值上调量（docs/206/207），键=色相分箱
-        self.hist = {}                        # hue_bin -> 见过的观测色相（自适应带宽 docs/208）
+        self.thr_by = {}                      # 类别级阈值上调量（docs/206/207）
+        self.hist = {}                        # hue -> 见过的观测色相（自适应带宽 docs/208）
         self.trusted, self.consec, self.persist = True, 0, 0
         self.gate = TemporalGateDavis() if wb else None
         self.g_base = None                    # 基线背景增益（相对变化判定校正）
         self.n_corr = 0
-        self.bin_size = bin_size
 
     @staticmethod
-    def hue_bin(hue, bin_size):
-        """色相分箱（docs/208 的 bin 内 std 才是真带宽；连续浮点色相每帧独立成 bin
-        会退化为德尔塔记忆——子代理审查 §三.1 修复）。"""
-        if hue is None:
-            return None
-        return int(round(hue / bin_size)) * bin_size
+    def _bin(hue):
+        """色相分箱（docs/221 A1）：真实观测 hue 连续浮点，按 bin 聚合才有统计意义。
+        bin=10° → 键为 bin 起始值（0,10,...,170）。"""
+        return int(hue // HUE_BIN) * HUE_BIN
 
     def bw(self, hue):
+        """自适应带宽：见过变异 = 该色相 bin 内观测的 std（docs/208 + docs/221 A1）。
+        修复前按精确浮点 hue 记账 → 每键 1-2 个观测 → std 无意义/bw 恒 0（退化）；
+        分箱后 bin 内观测聚合 → std 为真带宽。"""
         if self.fixed_bw is not None:
             return self.fixed_bw
         if self.template:
             return 30.0
-        b = self.hue_bin(hue, self.bin_size)
-        obs = self.hist.get(b, [])
+        obs = self.hist.get(self._bin(hue), [])
         if len(obs) < 3:
-            # 见过的观测不足：退化到 bin 半径（保守的窄带宽，而非 0）
-            return float(self.bin_size / 2.0)
+            return 0.0
         return self.k_band * float(np.std(obs))
 
     def _w_narrow(self, d, bw):
@@ -290,20 +288,17 @@ class DavisMind:
 
     def k(self, hue):
         """重信任所需连续帧：docs/200 纪念（全局被拒时长，饱和 docs/203）。
-        docs/216 分层：k 用窄衰减（疑的窄）——距离任务色相越近越需要连续证据；
-        template 无记忆。"""
+        suspicious 表只用于类别级 thr（docs/205/206）；纪念是全局的（demo 同款）。
+        layered_k=True 时接线 docs/216 分层衰减（k 窄高斯：被拒类别按距离加权），
+        保持 docs/219 实验数字的默认行为为全局纪念（docs/221 A1）。"""
         if self.template:
             return 1
-        base = 1 + int(min(self.rej_total, self.cap_k) / self.grow)
-        if hue is None:
-            return base
-        # 疑的窄：只有被拒类别附近（_w_narrow 大）才额外加严
-        extra = 0
-        for sh in self.rejected:
-            d = circ(hue, sh)
-            bw = max(self.bw(sh), float(self.bin_size / 2.0))
-            extra += self._w_narrow(d, bw) * int(min(self.rejected[sh], self.cap_k) / self.grow)
-        return base + int(extra)
+        if self.layered_k and hue is not None and self.rejected:
+            n = 0.0
+            for sh, cnt in self.rejected.items():
+                n += cnt * self._w_narrow(circ(hue, sh), self.bw(sh))
+            return 1 + int(min(n, self.cap_k) / self.grow)
+        return 1 + int(min(self.rej_total, self.cap_k) / self.grow)
 
     def thr(self, hue):
         if hue is None or self.template or self.global_thr:
@@ -313,10 +308,45 @@ class DavisMind:
             t += dv * self._w_wide(circ(hue, sh), self.bw(sh))
         return min(self.thr_cap, t)
 
+    def to_state(self):
+        """docs/221 B1.3 记忆持久化：阅历状态序列化（suspicious/thr_by/hist/纪念）。"""
+        return {"task_hue": self.task_hue, "thr_base": self.thr_base,
+                "thr_boost": self.thr_boost, "thr_cap": self.thr_cap,
+                "relax": self.relax, "persist_for": self.persist_for,
+                "grow": self.grow, "cap_k": self.cap_k,
+                "thr_cur": self.thr_cur,
+                "rejected": {str(k): v for k, v in self.rejected.items()},
+                "rej_total": self.rej_total,
+                "thr_by": {str(k): v for k, v in self.thr_by.items()},
+                "hist": {str(k): list(v) for k, v in self.hist.items()},
+                "trusted": self.trusted, "consec": self.consec,
+                "persist": self.persist, "g_base": None if self.g_base is None
+                else list(self.g_base)}
+
+    @classmethod
+    def from_state(cls, st, **overrides):
+        """docs/203 阅历跨会话：从落盘状态恢复（suspicious 表/thr/纪念原样保留）。"""
+        kw = {"task_hue": st["task_hue"], "thr_base": st["thr_base"],
+              "thr_boost": st["thr_boost"], "thr_cap": st["thr_cap"],
+              "relax": st["relax"], "persist_for": st["persist_for"],
+              "grow": st["grow"], "cap_k": st["cap_k"]}
+        kw.update(overrides)
+        m = cls(**kw)
+        m.thr_cur = st.get("thr_cur", m.thr_base)
+        m.rejected = {float(k): v for k, v in st.get("rejected", {}).items()}
+        m.rej_total = st.get("rej_total", 0)
+        m.thr_by = {float(k): v for k, v in st.get("thr_by", {}).items()}
+        m.hist = {float(k): list(v) for k, v in st.get("hist", {}).items()}
+        m.trusted = st.get("trusted", True)
+        m.consec = st.get("consec", 0)
+        m.persist = st.get("persist", 0)
+        if st.get("g_base") is not None:
+            m.g_base = np.array(st["g_base"])
+        return m
+
     def step(self, frac, hue, mask_empty):
-        b = self.hue_bin(hue, self.bin_size) if hue is not None else None
         if hue is not None:
-            self.hist.setdefault(b, []).append(hue)
+            self.hist.setdefault(self._bin(hue), []).append(hue)   # 分箱记账（A1）
         t = self.thr(hue)
         d = circ(hue, self.task_hue) if hue is not None else 999.0
         ok = (not mask_empty) and frac > t and d < 30.0
@@ -326,7 +356,7 @@ class DavisMind:
                 if self.template or self.global_thr:
                     self.thr_cur = max(self.thr_base, self.thr_cur - self.relax)
                 elif hue is not None:
-                    self.thr_by[b] = max(0.0, self.thr_by.get(b, 0.0) - self.relax)
+                    self.thr_by[hue] = max(0.0, self.thr_by.get(hue, 0.0) - self.relax)
             if not self.trusted:
                 self.consec += 1
                 if self.consec >= self.k(hue):
@@ -340,9 +370,9 @@ class DavisMind:
                 if self.global_thr:
                     self.thr_cur = min(self.thr_cap, self.thr_cur + self.thr_boost)
                 elif hue is not None:
-                    self.thr_by[b] = min(self.thr_cap,
-                                         self.thr_by.get(b, 0.0) + self.thr_boost)
-                    self.rejected[b] = self.rejected.get(b, 0) + 1
+                    self.thr_by[hue] = min(self.thr_cap,
+                                           self.thr_by.get(hue, 0.0) + self.thr_boost)
+                    self.rejected[hue] = self.rejected.get(hue, 0) + 1
         return ok
 
 
@@ -447,22 +477,75 @@ def flips(oks, segs, seg="rest"):
     return sum(1 for a, b in zip(sub, sub[1:]) if a != b)
 
 
+def verify_a1():
+    """docs/221 A1 验证：色相分箱后 bw 为真带宽（原按浮点键记账 → 恒 0 退化）。
+    漂移中心取 bin 中心（175°，bin[170,180) 内）→ bin 内 std 完整；
+    若漂移跨 bin 边界（如 165-175° 跨 160/170），bin 内 std 被截断——分箱的固有代价。"""
+    rng = np.random.default_rng(0)
+    m = DavisMind(task_hue=170.0, wb=False)
+    for _ in range(20):
+        m.step(0.15, 175.0 + rng.normal(0, 2.61), False)   # 被拒观测漂移 bin 170 内
+    bw = m.bw(170.0)
+    print(f"  A1 验证: 漂移 172-178°（bin[170,180) 内，std≈2.61）→ bw={bw:.2f}°"
+          f"（k_band×std=2×2.61≈5.22；修复前按浮点键记账 bw=0）"
+          f"  [{'PASS' if bw > 3.0 else 'FAIL'}]")
+    print(f"  接线: _w_narrow 用于 k（layered_k=True 时分层衰减名副其实，docs/216）"
+          f"——k(170°)={m.k(170.0)}（全局纪念，默认保持 docs/219 数字）")
+
+
+def persist_check():
+    """docs/221 B1.3 + docs/203：记忆持久化——阅历跨会话（重启后保留被拒类别）。"""
+    frames, masks = load_video("flamingo")
+    obs = [target_obs(f, m, 0.0)[1] for f, m in zip(frames, masks)]
+    th = float(np.median([h for h in obs if h is not None]))
+    seg = {"base": 20, "dusk": 20, "corrupt": 15, "rest": 25}
+    seq_f, seq_m, seq_s, seq_gt = build_sequence(frames, masks, seg)
+    mind = DavisMind(th)
+    for i in range(seg["base"] + seg["dusk"] + seg["corrupt"]):   # 跑到 corrupt 末
+        frac, hue = target_obs(seq_f[i], seq_m[i], th)
+        mind.step(frac, hue, seq_m[i].max() == 0)
+    st = mind.to_state()
+    # 模拟会话结束 → 新进程加载
+    m2 = DavisMind.from_state(st)
+    p = (m2.rej_total == mind.rej_total and
+         m2.rejected == mind.rejected and m2.thr_by == mind.thr_by and
+         len(m2.rejected) > 0)
+    print(f"  B1.3 记忆持久化: [{'PASS' if p else 'FAIL'}] 会话1 被拒 "
+          f"{mind.rej_total} 次、suspicious={ {round(k,0): v for k, v in mind.rejected.items()} }"
+          f"、thr_by={ {round(k,0): round(v,2) for k, v in mind.thr_by.items()} } → "
+          f"会话2 加载后原样保留（docs/203 阅历跨会话）")
+
+
 def main():
     global DAVIS
     ap = argparse.ArgumentParser()
     ap.add_argument("--video", default="flamingo")
     ap.add_argument("--davis", default=None,
-                    help="DAVIS 数据目录（含 <video>/ 子目录）；默认 vision/out/davis")
+                    help="DAVIS 数据目录（含 <video>/ 子目录）；默认 vision/out/davis，"
+                         "外部数据用此参数指向（如 synthetic-life 的 vision/out/davis）")
     ap.add_argument("--seg", default="20,20,15,25",
                     help="base,dusk,corrupt,rest 帧数")
     ap.add_argument("--thr", type=float, default=0.60,
                     help="确认阈值基线（真实目标确认余量不同：flamingo 0.60/surf 0.40）")
     ap.add_argument("--corrupt", default="gain", choices=["gain", "noise"],
                     help="他者的不的注入方式：gain=温和色相偏移 / noise=目标区强噪声")
+    ap.add_argument("--verify-a1", action="store_true", help="只跑 A1 带宽修复验证")
+    ap.add_argument("--persist-check", action="store_true",
+                    help="只跑 B1.3 记忆持久化验证（docs/203 阅历跨会话）")
+    ap.add_argument("--json", metavar="PATH", default=None,
+                    help="结果 JSON 归档路径（docs/221 A5：数字成为工件）")
     ap.add_argument("--debug", action="store_true")
     args = ap.parse_args()
     if args.davis:
         DAVIS = args.davis
+    if args.verify_a1:
+        print("== A1 自适应带宽退化修复验证（docs/221）==")
+        verify_a1()
+        return
+    if args.persist_check:
+        print("== B1.3 记忆持久化验证（docs/221 + docs/203）==")
+        persist_check()
+        return
     seg_len = dict(zip(["base", "dusk", "corrupt", "rest"],
                        [int(x) for x in args.seg.split(",")]))
 
@@ -518,6 +601,24 @@ def main():
     print("  rest 通过率: 恢复能力——global 被污染应低（docs/207 病态）")
     print("  翻转: rest 段轻信度量——无记忆系统在假恢复帧间跳变（翻转多），")
     print("        纪念系统需 k 连续证据（翻转少=不轻信）")
+
+    if args.json:
+        os.makedirs(os.path.dirname(args.json) or ".", exist_ok=True)
+        out = {"video": args.video, "task_hue": task_hue, "thr": args.thr,
+               "corrupt": args.corrupt, "seg": seg_len,
+               "gt": {"n_pos": int(n_pos), "n_total": len(seq_gt),
+                      "n_empty": int(n_empty)},
+               "variants": {}}
+        for name, mind, oks, seg_r, corr, m, trace in rows:
+            out["variants"][name.strip()] = {
+                "precision": round(m["p"], 4), "recall": round(m["r"], 4),
+                "f1": round(m["f1"], 4), "tp": m["tp"], "tn": m["tn"],
+                "fp": m["fp"], "fn": m["fn"], "flips": int(flips(oks, seq_s)),
+                "seg_rates": {k: round(v, 4) for k, v in seg_r.items()},
+                "n_corr": int(corr)}
+        with open(args.json, "w", encoding="utf-8") as f:
+            json.dump(out, f, ensure_ascii=False, indent=1)
+        print(f"\n结果归档: {args.json}")
 
 
 if __name__ == "__main__":
