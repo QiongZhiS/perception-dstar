@@ -233,7 +233,8 @@ class DavisMind:
 
     def __init__(self, task_hue, wb=True, global_thr=False, fixed_bw=None,
                  template=False, k_band=2.0, thr_base=0.60, thr_boost=0.04,
-                 thr_cap=0.85, relax=0.02, persist_for=3, grow=3.0, cap_k=60):
+                 thr_cap=0.85, relax=0.02, persist_for=3, grow=3.0, cap_k=60,
+                 bin_size=10.0):
         self.task_hue = task_hue
         self.wb, self.global_thr, self.template = wb, global_thr, template
         self.fixed_bw = fixed_bw
@@ -241,23 +242,34 @@ class DavisMind:
         self.thr_base, self.thr_boost, self.thr_cap = thr_base, thr_boost, thr_cap
         self.relax, self.persist_for, self.grow, self.cap_k = relax, persist_for, grow, cap_k
         self.thr_cur = thr_base               # global/template 用
-        self.rejected = {}                    # suspicious[hue] = 被拒累计（docs/205）
+        self.rejected = {}                    # suspicious[hue_bin] = 被拒累计（docs/205）
         self.rej_total = 0                    # 总被拒帧（docs/200 纪念）
-        self.thr_by = {}                      # 类别级阈值上调量（docs/206/207）
-        self.hist = {}                        # hue -> 见过的观测色相（自适应带宽 docs/208）
+        self.thr_by = {}                      # 类别级阈值上调量（docs/206/207），键=色相分箱
+        self.hist = {}                        # hue_bin -> 见过的观测色相（自适应带宽 docs/208）
         self.trusted, self.consec, self.persist = True, 0, 0
         self.gate = TemporalGateDavis() if wb else None
         self.g_base = None                    # 基线背景增益（相对变化判定校正）
         self.n_corr = 0
+        self.bin_size = bin_size
+
+    @staticmethod
+    def hue_bin(hue, bin_size):
+        """色相分箱（docs/208 的 bin 内 std 才是真带宽；连续浮点色相每帧独立成 bin
+        会退化为德尔塔记忆——子代理审查 §三.1 修复）。"""
+        if hue is None:
+            return None
+        return int(round(hue / bin_size)) * bin_size
 
     def bw(self, hue):
         if self.fixed_bw is not None:
             return self.fixed_bw
         if self.template:
             return 30.0
-        obs = self.hist.get(hue, [])
+        b = self.hue_bin(hue, self.bin_size)
+        obs = self.hist.get(b, [])
         if len(obs) < 3:
-            return 0.0
+            # 见过的观测不足：退化到 bin 半径（保守的窄带宽，而非 0）
+            return float(self.bin_size / 2.0)
         return self.k_band * float(np.std(obs))
 
     def _w_narrow(self, d, bw):
@@ -278,10 +290,20 @@ class DavisMind:
 
     def k(self, hue):
         """重信任所需连续帧：docs/200 纪念（全局被拒时长，饱和 docs/203）。
-        suspicious 表只用于类别级 thr（docs/205/206）；纪念是全局的（demo 同款）。"""
+        docs/216 分层：k 用窄衰减（疑的窄）——距离任务色相越近越需要连续证据；
+        template 无记忆。"""
         if self.template:
             return 1
-        return 1 + int(min(self.rej_total, self.cap_k) / self.grow)
+        base = 1 + int(min(self.rej_total, self.cap_k) / self.grow)
+        if hue is None:
+            return base
+        # 疑的窄：只有被拒类别附近（_w_narrow 大）才额外加严
+        extra = 0
+        for sh in self.rejected:
+            d = circ(hue, sh)
+            bw = max(self.bw(sh), float(self.bin_size / 2.0))
+            extra += self._w_narrow(d, bw) * int(min(self.rejected[sh], self.cap_k) / self.grow)
+        return base + int(extra)
 
     def thr(self, hue):
         if hue is None or self.template or self.global_thr:
@@ -292,8 +314,9 @@ class DavisMind:
         return min(self.thr_cap, t)
 
     def step(self, frac, hue, mask_empty):
+        b = self.hue_bin(hue, self.bin_size) if hue is not None else None
         if hue is not None:
-            self.hist.setdefault(hue, []).append(hue)
+            self.hist.setdefault(b, []).append(hue)
         t = self.thr(hue)
         d = circ(hue, self.task_hue) if hue is not None else 999.0
         ok = (not mask_empty) and frac > t and d < 30.0
@@ -303,7 +326,7 @@ class DavisMind:
                 if self.template or self.global_thr:
                     self.thr_cur = max(self.thr_base, self.thr_cur - self.relax)
                 elif hue is not None:
-                    self.thr_by[hue] = max(0.0, self.thr_by.get(hue, 0.0) - self.relax)
+                    self.thr_by[b] = max(0.0, self.thr_by.get(b, 0.0) - self.relax)
             if not self.trusted:
                 self.consec += 1
                 if self.consec >= self.k(hue):
@@ -317,9 +340,9 @@ class DavisMind:
                 if self.global_thr:
                     self.thr_cur = min(self.thr_cap, self.thr_cur + self.thr_boost)
                 elif hue is not None:
-                    self.thr_by[hue] = min(self.thr_cap,
-                                           self.thr_by.get(hue, 0.0) + self.thr_boost)
-                    self.rejected[hue] = self.rejected.get(hue, 0) + 1
+                    self.thr_by[b] = min(self.thr_cap,
+                                         self.thr_by.get(b, 0.0) + self.thr_boost)
+                    self.rejected[b] = self.rejected.get(b, 0) + 1
         return ok
 
 
