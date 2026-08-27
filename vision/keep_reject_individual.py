@@ -125,10 +125,46 @@ def retrust_delay(seq_id, rej_end):
     return None
 
 
+class LookupTableMind:
+    """查找表对照（docs/222 §四 2 / docs/226 L6 证伪条件）：
+    有 ID 记忆（知道哪个是 A），但拒绝历史**不影响重信任策略**（k 恒 1，无纪念）。
+
+    它区分"记得 A 被拒过"（记忆）与"被拒历史改变后续对待"（在乎，docs/200）：
+    - 若查找表版 A 恢复后立即信任（延迟 1）→ 个体归因的分化来自"拒绝历史改变
+      策略"（在乎），L6 证伪条件不触发；
+    - 若查找表版 A/B 也分化（延迟不同）→ 分化来自 ID 记忆本身，L6 塌。
+    """
+
+    def __init__(self, thr=0.2):
+        self.thr = thr
+        self.trusted = {"A": True, "B": True}
+
+    def k(self, id_):
+        return 1  # 无纪念：被拒后立即重新信任
+
+    def step(self, id_, frac, hue):
+        ok = frac > self.thr
+        if ok:
+            self.trusted[id_] = True
+        else:
+            self.trusted[id_] = False
+        return self.trusted[id_] and ok
+
+
+def run_lookup(frames, truth):
+    mind = LookupTableMind()
+    seq = {"A": [], "B": []}
+    for i, (fr, tr) in enumerate(zip(frames, truth)):
+        for id_, center in [("A", tr[1]), ("B", tr[4])]:
+            frac, med = ball_frac_red(fr, center)
+            seq[id_].append(mind.step(id_, frac, med))
+    return seq, mind
+
+
 REJ = (30, 60)
 TOTAL = 120
 
-print("== L6 个体归因实验（docs/221 §六 预言）==")
+print("== L6 个体归因实验（docs/221 §六 预言 + docs/226 证伪条件）==")
 print("两个红球 A/B，只有 A 中段被染蓝 30 帧，B 全程正常")
 print("suspicious 按 hue 记账（A/B 同色→类别级无法区分）\n")
 
@@ -144,7 +180,20 @@ for individual in [True, False]:
     print(f"  A 累计被拒: {mind.rejected_id['A']}  B 累计被拒: {mind.rejected_id['B']}")
     print()
 
+# 查找表对照（docs/226 L6 证伪条件）
+frames, truth = make_two_balls(TOTAL, REJ)
+seq_lt, mind_lt = run_lookup(frames, truth)
+da_lt = retrust_delay(seq_lt["A"], REJ[1])
+db_lt = retrust_delay(seq_lt["B"], REJ[1])
+print("--- 查找表对照（docs/222 §四 2：有 ID 记忆、无纪念，k 恒 1）---")
+print(f"  A（被欺骗）重信任延迟: {da_lt}")
+print(f"  B（全程正常）重信任延迟: {db_lt}")
+print()
+
 print("== 判读 ==")
 print("预言成立：个体记账下 A 延迟 ≫ B（B≈1 或远小于 A）——被拒历史按来源 ID 分化")
 print("对照组：仅类别记账下 A/B 延迟相同（同 hue 共享记账）——类别级无法区分")
+print("查找表对照：有 ID 记忆但 k 恒 1（无纪念）——")
+print("  若 A 恢复后立即信任（延迟 1）→ 分化来自'拒绝历史改变策略'（在乎），L6 证伪")
+print("  条件不触发；若查找表版 A/B 也分化 → 分化来自 ID 记忆本身，L6 塌")
 print("若个体记账下 A/B 延迟仍相同 → 预言落空，L6 降回第 5 层扩展（docs/221 §七）")
