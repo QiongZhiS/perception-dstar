@@ -15,3 +15,7 @@ vision/out/davis/*
 *.key
 .env
 live_state.json
+
+# 本地运行产物与备份（logs 内含可能触发内容审核的输出，人可读、严禁进版本库）
+logs/
+*.bak

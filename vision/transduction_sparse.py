@@ -21,6 +21,38 @@ docs/225 可落地三件事 1/2：
 import os
 import sys
 
+# ---- stdout/stderr redirect: full output to files, terminal gets one ASCII line ----
+_STDOUT_ORIG = sys.__stdout__
+_STDERR_ORIG = sys.__stderr__
+_LOGS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs")
+os.makedirs(_LOGS_DIR, exist_ok=True)
+sys.stdout = open(os.path.join(_LOGS_DIR, "transduction_sparse_out.txt"), "w", encoding="utf-8")
+sys.stderr = open(os.path.join(_LOGS_DIR, "transduction_sparse_err.txt"), "w", encoding="utf-8")
+
+_FAILED = False
+
+
+def _report_failure(exc_type, exc_value, exc_tb):
+    global _FAILED
+    _FAILED = True
+    sys.__excepthook__(exc_type, exc_value, exc_tb)
+
+
+sys.excepthook = _report_failure
+
+
+def _report_exit():
+    line = "[ok] done - full output: logs/transduction_sparse_out.txt" if not _FAILED \
+        else "[err] failed - see logs/transduction_sparse_err.txt"
+    _STDOUT_ORIG.write(line + "\n")
+    _STDOUT_ORIG.flush()
+    sys.stdout.flush()
+    sys.stderr.flush()
+
+
+import atexit
+atexit.register(_report_exit)
+
 import numpy as np
 
 sys.path.insert(0, "vision")
