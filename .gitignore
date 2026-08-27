@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# 实验输出（大文件不进 git；需要分享的图/表用 out/ 子目录的白名单）
+vision/out/*.mp4
+vision/out/*.avi
+vision/out/*.npy
+vision/out/davis/*
+
+# 密钥与本地状态（纪律：绝不落盘）
+*.key
+.env
+live_state.json
