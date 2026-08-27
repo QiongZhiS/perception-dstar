@@ -274,7 +274,7 @@ def main():
     print(f"{'θ':>6s} {'事件/帧':>8s} {'目标区事件/帧':>12s} {'能效(1/事件)':>10s}")
     for th in [0.05, 0.10, 0.15, 0.20, 0.30, 0.50]:
         _, evs_, tg_, _ = run_pipeline(frames, masks_t, sparse=False, thresh=th)
-        print(f"{th:6.2f} {evs_.mean():8.1f} {tg_.mean():12.1f} {1.0 / max(evs_.mean(), 1):10.3f}")
+        print(f"{th:6.2f} {evs_.mean():8.1f} {tg_.mean():12.1f} {1.0 / max(evs_.mean(), 1):10.2e}")
     print("  读法：θ ↑ → 事件↓（省）→ 目标区事件↓（漏）——θ 是能效旋钮（docs/225 方向 3）")
     print("  能效-精度同轴：静态场景抬 θ 看更省、需要时降 θ 看更细")
 
