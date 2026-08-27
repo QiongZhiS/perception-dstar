@@ -10,6 +10,7 @@ vision/out/*.mp4
 vision/out/*.avi
 vision/out/*.npy
 vision/out/davis/*
+vision/out/results/*
 
 # 密钥与本地状态（纪律：绝不落盘）
 *.key

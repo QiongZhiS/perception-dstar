@@ -1,6 +1,13 @@
-# docs/221 A5 可复现性资产：本线（docs/178 第 6 层视觉机制链）依赖
-# 验证环境：Python 3.11 + Windows（其他平台 numpy/opencv 换源即可）
-numpy>=1.24
-opencv-python>=4.8
-# 仅 davis_setup.py 下载/解压 DAVIS 2017 trainval 用（std lib urllib/zipfile，无需额外）
-# imageio-ffmpeg 为 docs/182 视频线遗留依赖（本线实验不强制）
+# perception-dstar - verified dependency lock (docs/221 A5 reproducibility assets).
+# Source: AST scan of top-level imports in vision/*.py (see scan_imports.py).
+# Only two third-party packages are imported at top level across vision/*.py:
+#   numpy (import numpy)
+#   cv2   (import cv2 -> opencv-python)
+# All other top-level imports are stdlib (argparse/base64/http/io/itertools/json/
+# os/subprocess/sys/threading/time/urllib/warnings/zipfile) or vision-local modules.
+# davis_setup.py needs no extra dependency (stdlib urllib/zipfile only).
+# imageio-ffmpeg: optional, lazy-imported only by compress.py / preview.py
+# (docs/182 video-line H.264 re-encoding utilities), not by quick-start experiments.
+# Verified environment: Python 3.11.15, Windows x64 (2026-08).
+numpy==2.4.6
+opencv-python==5.0.0

@@ -10,8 +10,8 @@ DAVIS 2017（Densely Annotated VIdeo Segmentation）：真实拍摄、逐帧像�
 用法：
   python vision/davis_setup.py                          # 下载 + 解压默认视频（blackswan）
   python vision/davis_setup.py --videos bear,camel      # 指定视频（逗号分隔）
-  python vision/davis_setup.py --list                   # 列出训练集视频名（需先下载 zip）
-  python vision/davis_setup.py --skip-download          # 已下载 zip，只解压
+  python vision/davis_setup.py --list                   # 列出训练集视频名（zip 已删时从 manifest 列已抽取视频）
+  python vision/davis_setup.py --skip-download          # 已下载 zip 只解压；zip 已删但数据已抽取时直接通过
 
 输出：vision/out/davis/<video>/（JPEG 帧 + 掩码 PNG + 视频清单 JSON）
 
@@ -93,6 +93,17 @@ def extract_videos(zip_path, videos):
 
 
 def list_videos(zip_path):
+    if not os.path.exists(zip_path):
+        # zip 已删但已抽取数据在：从 manifest 回退，避免误导性"先下载"提示
+        manifest_path = os.path.join(OUT, "manifest.json")
+        if os.path.exists(manifest_path):
+            with open(manifest_path, encoding="utf-8") as f:
+                manifest = json.load(f)
+            print("zip 不存在（已删？），从已抽取数据 manifest 列出：")
+            for v in sorted(manifest):
+                print(f"  {v}")
+            return
+        sys.exit(f"zip 与 manifest 都不在：{zip_path}；先运行 python vision/davis_setup.py 下载")
     with zipfile.ZipFile(zip_path) as zf:
         names = set()
         for n in zf.namelist():
@@ -114,10 +125,16 @@ def main():
 
     zip_path = os.path.join(OUT, ZIP_NAME)
     if args.list:
-        if not os.path.exists(zip_path):
-            sys.exit(f"先下载：python vision/davis_setup.py（zip 在 {zip_path}）")
-        list_videos(zip_path)
+        list_videos(zip_path)   # 内部处理 zip 缺失（manifest 回退）
         return
+    if args.skip_download and not os.path.exists(zip_path):
+        # zip 已删但已抽取数据在：直接通过（不重下、不重抽），仅提示
+        if os.path.isdir(OUT) and any(
+            os.path.isdir(os.path.join(OUT, v)) for v in os.listdir(OUT)
+        ):
+            print(f"zip 不存在（{zip_path}），已抽取数据保留在 {OUT}，跳过抽取；需重抽请重新下载 zip。")
+            return
+        sys.exit(f"zip 不存在且 {OUT} 无已抽取数据：{zip_path}；先运行 python vision/davis_setup.py 下载")
     if not args.skip_download:
         download(zip_path)
     extract_videos(zip_path, [v.strip() for v in args.videos.split(",") if v.strip()])

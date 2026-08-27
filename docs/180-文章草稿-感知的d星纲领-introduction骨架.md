@@ -5,6 +5,9 @@
 >
 > 状态：草稿骨架（未成稿）。定位（docs/127 论文路线）：Zenodo DOI 归档 + ALIFE 主投 +
 > CogSci 备选。核心图 = SEED-62 机制表 + 感知 d\*（1D 已跑）+ 2D 转导/闭环（vision/）。
+> ⚠️ A5 处置（docs/221）：SEED-62/1D 的代码（seed-62/light.py，docs/135）不在本仓库、
+> 无法复现（见 docs/181 §2.1 注）；核心图改以 2D d\*（8.68，vision/dstar2d.py）为主图，
+> 1D 只作历史背景或删除。
 
 ---
 
@@ -99,7 +102,7 @@
 | 数据 | 状态 | 数字 |
 |---|---|---|
 | 感知 d\* **2D 版**（vision/dstar2d.py，41 seeds） | ☑ | **EV-2D d\*=8.68（预言带 8-10 ✓）；FIXED-2D d\*=4.67（双端失效：暗端刻度错位 + 亮端过曝崩回 0.333）；侧抑制贡献 +3 档（EV 8.68 vs EV-noHib 5.77）** |
-| 感知 d\* 1D 版（docs/135） | ☑ | ADAPT 9.66 vs FIXED 6.18（预言带命中） |
+| 感知 d\* 1D 版（docs/135，代码不在本仓库） | ⚠️ 不可复现 | ADAPT 9.66 vs FIXED 6.18（A5 处置：需在 vision/ 重跑或删，见 docs/181 §2.1） |
 | 事件→物体闭环（vision/close_loop.py） | ☑ | 慢圆 78%/快方块 76%、7-16px、闪变期慢圆 67% |
 | 自适应 vs 固定（vision/adaptive_test.py） | ☑ | 风暴段 4.3× 更安静、C1 0.0000 |
 | 检查单四项（vision/checklist.py） | ☑ | 4/4 PASS |
