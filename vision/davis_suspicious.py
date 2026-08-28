@@ -43,11 +43,14 @@ docs/218 缺口 1（致命）：docs/205-216 整条"阅历"进化链全是色相
 用法：
   python vision/davis_suspicious.py                          # flamingo（gain corrupt）
   python vision/davis_suspicious.py --video surf --seg 14,12,10,19 --thr 0.40 --corrupt noise
+  python vision/davis_suspicious.py --save-state             # 阅历落盘（docs/234 B1.3）
+  python vision/davis_suspicious.py --load-state             # 重启续跑（等价未重启）
 """
 import argparse
 import json
 import os
 import sys
+import time
 
 import numpy as np
 
@@ -309,11 +312,26 @@ class DavisMind:
         return min(self.thr_cap, t)
 
     def to_state(self):
-        """docs/221 B1.3 记忆持久化：阅历状态序列化（suspicious/thr_by/hist/纪念）。"""
+        """docs/221 B1.3 记忆持久化：阅历状态序列化（docs/234）。
+
+        自包含快照 = 配置（机制参数）+ 阅历（suspicious/thr_by/hist/纪念）+ 运行态
+        （信任状态/门/白平衡基线/校正计数）。行为等价"没重启过"需要全量——缺门或
+        g_base 时，重启后时间门判据/校正判定会从头重来，rest 段行为可能偏离。
+        """
+        gate = None
+        if self.gate is not None:
+            gate = {"mad_gate": self.gate.mad_gate, "alpha": self.gate.alpha,
+                    "warmup": self.gate.warmup, "delta_gate": self.gate.delta_gate,
+                    "d_mu": self.gate.d_mu, "prev": self.gate.prev,
+                    "n": self.gate.n}
         return {"task_hue": self.task_hue, "thr_base": self.thr_base,
                 "thr_boost": self.thr_boost, "thr_cap": self.thr_cap,
                 "relax": self.relax, "persist_for": self.persist_for,
                 "grow": self.grow, "cap_k": self.cap_k,
+                "k_band": self.k_band,
+                "wb": self.wb, "global_thr": self.global_thr,
+                "template": self.template, "fixed_bw": self.fixed_bw,
+                "layered_k": self.layered_k,
                 "thr_cur": self.thr_cur,
                 "rejected": {str(k): v for k, v in self.rejected.items()},
                 "rej_total": self.rej_total,
@@ -321,15 +339,26 @@ class DavisMind:
                 "hist": {str(k): list(v) for k, v in self.hist.items()},
                 "trusted": self.trusted, "consec": self.consec,
                 "persist": self.persist, "g_base": None if self.g_base is None
-                else list(self.g_base)}
+                else list(self.g_base),
+                "n_corr": self.n_corr, "gate": gate}
 
     @classmethod
     def from_state(cls, st, **overrides):
-        """docs/203 阅历跨会话：从落盘状态恢复（suspicious 表/thr/纪念原样保留）。"""
+        """docs/203 阅历跨会话：从落盘状态恢复（docs/234）。
+
+        状态为自包含快照：配置（wb/template/global_thr/fixed_bw/layered_k/k_band +
+        阈值参数）+ 阅历（suspicious 表/thr_by/hist/纪念）+ 运行态（信任状态/门/
+        白平衡基线/校正计数）原样恢复；overrides 覆盖构造参数（如跨配置迁移阅历）。
+        """
         kw = {"task_hue": st["task_hue"], "thr_base": st["thr_base"],
               "thr_boost": st["thr_boost"], "thr_cap": st["thr_cap"],
               "relax": st["relax"], "persist_for": st["persist_for"],
-              "grow": st["grow"], "cap_k": st["cap_k"]}
+              "grow": st["grow"], "cap_k": st["cap_k"],
+              "k_band": st.get("k_band", 2.0),
+              "wb": st.get("wb", False), "global_thr": st.get("global_thr", False),
+              "template": st.get("template", False),
+              "fixed_bw": st.get("fixed_bw"),
+              "layered_k": st.get("layered_k", False)}
         kw.update(overrides)
         m = cls(**kw)
         m.thr_cur = st.get("thr_cur", m.thr_base)
@@ -340,8 +369,18 @@ class DavisMind:
         m.trusted = st.get("trusted", True)
         m.consec = st.get("consec", 0)
         m.persist = st.get("persist", 0)
+        m.n_corr = st.get("n_corr", 0)
         if st.get("g_base") is not None:
             m.g_base = np.array(st["g_base"])
+        g = st.get("gate")
+        if g is not None and m.gate is not None:
+            m.gate.mad_gate = g.get("mad_gate", m.gate.mad_gate)
+            m.gate.alpha = g.get("alpha", m.gate.alpha)
+            m.gate.warmup = g.get("warmup", m.gate.warmup)
+            m.gate.delta_gate = g.get("delta_gate", m.gate.delta_gate)
+            m.gate.d_mu = g.get("d_mu")
+            m.gate.prev = g.get("prev")
+            m.gate.n = g.get("n", 0)
         return m
 
     def step(self, frac, hue, mask_empty):
@@ -374,6 +413,56 @@ class DavisMind:
                                            self.thr_by.get(hue, 0.0) + self.thr_boost)
                     self.rejected[hue] = self.rejected.get(hue, 0) + 1
         return ok
+
+
+# ---- 记忆持久化（docs/221 B1.3 + docs/234：阅历跨会话）----
+
+
+STATE_DIR = os.path.join("vision", "out", "state")   # 落盘位置（任务指定）
+STATE_VERSION = 1                                     # 状态文件格式版本
+_STATE_DEFAULT = object()   # argparse 哨兵：--save-state/--load-state 裸用→默认路径
+
+
+def default_state_path(video, seed=7, corrupt="gain"):
+    """默认落盘位置：vision/out/state/<video>_s<seed>_<corrupt>.json。"""
+    return os.path.join(STATE_DIR, "%s_s%d_%s.json" % (video, int(seed), corrupt))
+
+
+def save_state(path, minds, meta=None):
+    """DavisMind 阅历状态落盘（docs/234）：{key: DavisMind} → JSON。
+
+    payload = {artifact, doc_ref, state_version, saved_at, meta,
+               variants: {key: to_state() 快照}}。返回实际写入路径。
+    """
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    payload = {"artifact": "davis_suspicious_state", "doc_ref": "docs/234",
+               "state_version": STATE_VERSION,
+               "saved_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+               "meta": meta or {},
+               "variants": {k: m.to_state() for k, m in minds.items()}}
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=1)
+    return path
+
+
+def load_state(path, cfgs=None):
+    """从落盘 JSON 恢复阅历（docs/234）。
+
+    cfgs: {key: 构造参数}（变体配置，如 {"A": {"wb": True}}）——状态快照自包含
+    配置，但显式传入当前运行配置可保证与本次运行一致（也支持跨配置迁移）。
+    返回 {key: DavisMind}；cfgs 为 None 时返回原始状态 dict（调用方自行构造）。
+    """
+    with open(path, encoding="utf-8") as f:
+        payload = json.load(f)
+    states = {k: st for k, st in payload["variants"].items()}
+    if cfgs is None:
+        return states
+    out = {}
+    for key, cfg in cfgs.items():
+        st = states.get(key)
+        if st is not None:
+            out[key] = DavisMind.from_state(st, **cfg)
+    return out
 
 
 # ---- 管线 ----
@@ -513,7 +602,8 @@ def verify_a1():
 
 
 def persist_check():
-    """docs/221 B1.3 + docs/203：记忆持久化——阅历跨会话（重启后保留被拒类别）。"""
+    """docs/221 B1.3 + docs/203：记忆持久化——阅历跨会话（重启后保留被拒类别）。
+    内存 round-trip（原验证）+ 落盘 JSON round-trip（docs/234 工程化）。"""
     frames, masks = load_video("flamingo")
     obs = [target_obs(f, m, 0.0)[1] for f, m in zip(frames, masks)]
     th = float(np.median([h for h in obs if h is not None]))
@@ -524,7 +614,7 @@ def persist_check():
         frac, hue = target_obs(seq_f[i], seq_m[i], th)
         mind.step(frac, hue, seq_m[i].max() == 0)
     st = mind.to_state()
-    # 模拟会话结束 → 新进程加载
+    # 模拟会话结束 → 新进程加载（内存）
     m2 = DavisMind.from_state(st)
     p = (m2.rej_total == mind.rej_total and
          m2.rejected == mind.rejected and m2.thr_by == mind.thr_by and
@@ -533,6 +623,15 @@ def persist_check():
           f"{mind.rej_total} 次、suspicious={ {round(k,0): v for k, v in mind.rejected.items()} }"
           f"、thr_by={ {round(k,0): round(v,2) for k, v in mind.thr_by.items()} } → "
           f"会话2 加载后原样保留（docs/203 阅历跨会话）")
+    # 落盘 round-trip（docs/234）：save_state → load_state（JSON 序列化无损）
+    path = os.path.join(STATE_DIR, "persist_check.json")
+    save_state(path, {"A": mind}, meta={"check": "persist_check"})
+    m3 = load_state(path, {"A": {"wb": True}})["A"]
+    p2 = (m3.rej_total == mind.rej_total and m3.rejected == mind.rejected and
+          m3.thr_by == mind.thr_by and m3.hist == mind.hist and
+          m3.gate.n == mind.gate.n)
+    print(f"  B1.3 落盘 round-trip: [{'PASS' if p2 else 'FAIL'}] {path}"
+          f"（JSON 序列化后 suspicious/thr_by/hist/门 无损）")
 
 
 def main():
@@ -556,6 +655,14 @@ def main():
                     help="只跑 B1.3 记忆持久化验证（docs/203 阅历跨会话）")
     ap.add_argument("--json", metavar="PATH", default=None,
                     help="结果 JSON 归档路径（docs/221 A5：数字成为工件）")
+    ap.add_argument("--save-state", nargs="?", const=_STATE_DEFAULT, default=None,
+                    metavar="PATH",
+                    help="跑完后把各变体 DavisMind 阅历状态落盘（docs/234）；"
+                         "省略 PATH 用默认 vision/out/state/<video>_s<seed>_<corrupt>.json")
+    ap.add_argument("--load-state", nargs="?", const=_STATE_DEFAULT, default=None,
+                    metavar="PATH",
+                    help="运行前从落盘 JSON 加载阅历（重启续跑，等价未重启，docs/234）；"
+                         "省略 PATH 用默认位置；状态里没有的变体回退全新")
     ap.add_argument("--debug", action="store_true")
     args = ap.parse_args()
     if args.davis:
@@ -588,28 +695,40 @@ def main():
     print(f"序列 {len(seq_f)} 帧（base/dusk/corrupt/rest 段；rest 前 8 帧混 4 假恢复），"
           f"空掩码帧（目标消失）{n_empty}，GT 正样本 {n_pos}/{len(seq_gt)}\n")
 
-    mk = lambda **kw: DavisMind(task_hue, thr_base=args.thr, **kw)   # noqa: E731
-    variants = [
-        ("A full      (wb, 类别级, 自适应带宽)", mk()),
-        ("B nowb      (类别级, 自适应带宽)", mk(wb=False)),
-        ("C global-wb (全局 thr, 有白平衡)", mk(global_thr=True)),
-        ("C2 global   (全局 thr, 无白平衡)", mk(global_thr=True, wb=False)),
-        ("D template  (朴素模板匹配, 无wb)", mk(template=True, wb=False)),
-        ("E fixedbw10 (固定带宽10°, 无wb)", mk(wb=False, fixed_bw=10.0)),
-        ("F fixedbw30 (固定带宽30°, 无wb)", mk(wb=False, fixed_bw=30.0)),
+    # 变体规格：稳定 key（状态落盘键）+ 显示名（表格/JSON 保持 docs/219 原样）
+    variant_specs = [
+        ("A", "A full      (wb, 类别级, 自适应带宽)", {}),
+        ("B", "B nowb      (类别级, 自适应带宽)", dict(wb=False)),
+        ("C", "C global-wb (全局 thr, 有白平衡)", dict(global_thr=True)),
+        ("C2", "C2 global   (全局 thr, 无白平衡)", dict(global_thr=True, wb=False)),
+        ("D", "D template  (朴素模板匹配, 无wb)", dict(template=True, wb=False)),
+        ("E", "E fixedbw10 (固定带宽10°, 无wb)", dict(wb=False, fixed_bw=10.0)),
+        ("F", "F fixedbw30 (固定带宽30°, 无wb)", dict(wb=False, fixed_bw=30.0)),
     ]
+    loaded = None
+    if args.load_state is not None:
+        l_path = (args.load_state if args.load_state is not _STATE_DEFAULT
+                  else default_state_path(args.video, args.seed, args.corrupt))
+        print(f"加载阅历状态: {l_path}（docs/234：重启续跑，行为等价未重启）")
+        loaded = load_state(l_path, {key: cfg for key, _, cfg in variant_specs})
+    variants = []
+    for key, name, cfg in variant_specs:
+        if loaded is not None and key in loaded:
+            variants.append((key, name, loaded[key]))     # 阅历：继续上次的怀疑/阈值/纪念
+        else:
+            variants.append((key, name, DavisMind(task_hue, thr_base=args.thr, **cfg)))
 
     rows = []
-    for name, mind in variants:
+    for key, name, mind in variants:
         oks, seg_r, corr, trace = run_mind(mind, seq_f, seq_m, seq_s, task_hue, args.video,
                                            debug=args.debug)
         m = metrics(oks, seq_gt)
-        rows.append((name, mind, oks, seg_r, corr, m, trace))
+        rows.append((key, name, mind, oks, seg_r, corr, m, trace))
 
     print("== 各段确认通过率（P/R/F1 标准检测度量 + 轻信翻转 + docs/207 误报漏报）==")
     print(f"{'变体':46s} {'base':>5s} {'dusk':>5s} {'corr':>5s} {'rest':>5s} "
           f"{'P':>5s} {'R':>5s} {'F1':>5s} {'翻转':>4s} {'误报':>5s} {'漏报':>5s}")
-    for name, mind, oks, seg_r, corr, m, trace in rows:
+    for key, name, mind, oks, seg_r, corr, m, trace in rows:
         fp_r = m["fp"] / (m["fp"] + m["tn"]) if m["fp"] + m["tn"] else 0.0
         fn_r = m["fn"] / (m["fn"] + m["tp"]) if m["fn"] + m["tp"] else 0.0
         print(f"{name:46s} {seg_r['base']:5.2f} {seg_r['dusk']:5.2f} {seg_r['corrupt']:5.2f} "
@@ -631,7 +750,7 @@ def main():
                "gt": {"n_pos": int(n_pos), "n_total": len(seq_gt),
                       "n_empty": int(n_empty)},
                "variants": {}}
-        for name, mind, oks, seg_r, corr, m, trace in rows:
+        for key, name, mind, oks, seg_r, corr, m, trace in rows:
             out["variants"][name.strip()] = {
                 "precision": round(m["p"], 4), "recall": round(m["r"], 4),
                 "f1": round(m["f1"], 4), "tp": m["tp"], "tn": m["tn"],
@@ -642,6 +761,15 @@ def main():
         with open(args.json, "w", encoding="utf-8") as f:
             json.dump(out, f, ensure_ascii=False, indent=1)
         print(f"\n结果归档: {args.json}")
+
+    if args.save_state is not None:
+        s_path = (args.save_state if args.save_state is not _STATE_DEFAULT
+                  else default_state_path(args.video, args.seed, args.corrupt))
+        save_state(s_path, {key: mind for key, name, mind, *_ in rows},
+                   meta={"video": args.video, "seed": args.seed, "thr": args.thr,
+                         "corrupt": args.corrupt, "seg": seg_len,
+                         "n_frames": len(seq_f)})
+        print(f"\n阅历状态落盘: {s_path}（docs/234；重启后 --load-state 续跑）")
 
 
 if __name__ == "__main__":

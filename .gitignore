@@ -13,6 +13,7 @@ vision/out/*.png
 vision/out/*.json
 vision/out/davis/*
 vision/out/results/*
+vision/out/state/*
 
 # 密钥与本地状态（纪律：绝不落盘）
 *.key
