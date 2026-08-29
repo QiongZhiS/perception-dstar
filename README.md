@@ -57,7 +57,7 @@
 | 5 | 颜色恒常判据 | "何时校正"=MAD×帧间\|Δ\|；DAVIS 6 视频噪声全关、渐变全开 | `vision/davis_constancy.py` | docs/199/199b |
 | 6 | 拒绝的历史 | 吸收漂移 120°（自我被重写）vs 保留守住 + 纪念加深（r=0.999） | `vision/keep_reject*.py` | docs/200/201 |
 | 7 | 类别级怀疑系统 | suspicious 表 × 自适应带宽 × 连续加权 × 分层衰减（疑窄严宽） | `vision/experience_categories.py` 等 | docs/205-216 |
-| 8 | **真实图像验证** | 整条机制链上 DAVIS 真实目标（flamingo/surf），标准 P/R/F1 + 7 变体基线对照 | `vision/davis_suspicious.py` | docs/219/220 |
+| 8 | **真实图像验证** | 整条机制链上 DAVIS 真实目标（flamingo/surf），标准 P/R/F1 + 7 变体基线对照 | `vision/davis_suspicious.py` | docs/219 |
 | 9 | 可交互演示 | 浏览器可见"它在看什么/维持什么/怀疑什么/怎么说" | `vision/demo_app.py` | docs/217 |
 
 ## 快速开始
@@ -98,10 +98,10 @@ perception-dstar/
 
 ## 路线图
 
-- 视觉线：转导闭环 ✅ → 类别级怀疑系统 ✅ → 真实图像验证（DAVIS P/R/F1）✅ → 可交互演示 ✅ → 多目标/记忆持久化（docs/220 未完成 1-3）
+- 视觉线：转导闭环 ✅ → 类别级怀疑系统 ✅ → 真实图像验证（DAVIS P/R/F1）✅ → 可交互演示 ✅ → 多目标/记忆持久化（docs/233/234）✅
 - 听觉线（未来）：六层阶梯第二模态（docs/221+）
 - core（未来）：跨模态共享件——利害外置、Top-K 威胁度、否定注册、态势地图
-- 论文：docs/180/181 骨架 + docs/219（标准度量/基线/文献划界）→ 全文
+- 论文：docs/219（标准度量/基线/文献划界）+ 泛化阶梯（docs/246-259）→ 全文
 
 ## 一句话
 

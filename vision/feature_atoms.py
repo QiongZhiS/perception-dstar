@@ -120,7 +120,7 @@ def main():
         make_demo_video(src, mode="blinks")
         if not os.path.exists(src):
             print("生成失败，尝试从 synthetic-life 复制...")
-            alt = r"C:\Users\fa278\projects\synthetic-life\vision\out\demo_blinks.mp4"
+            alt = r"C:\Users\<用户名>\projects\synthetic-life\vision\out\demo_blinks.mp4"
             if os.path.exists(alt):
                 os.makedirs(os.path.dirname(src), exist_ok=True)
                 import shutil

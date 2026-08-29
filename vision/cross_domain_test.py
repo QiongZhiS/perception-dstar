@@ -2,7 +2,7 @@
 真实野视频域（docs/247 泛化层级规范第一次执行）。
 
 预注册（docs/248 §一，冻结；判据与视频选择先于任何运行写入 docs/248，docs/63+247 纪律）：
-  数据域：C:\\Users\\fa278\\Downloads 的 B 站野视频（Get-ChildItem 候选 + 探针元数据，
+  数据域：C:\\Users\\<用户名>\\Downloads 的 B 站野视频（Get-ChildItem 候选 + 探针元数据，
     预注册选择 V1 studio 人物/说话 / V2 B 站用户内容 / V3 快速剪辑梗短片）。
   预处理：cv2 逐帧解码 + 间隔抽帧（step=max(1,round(T/500))，目标每视频 ~400-600 采样帧）
     -> 灰度 -> resize 160x120 (INTER_AREA) -> uint8 -> 流式输入（window=10 帧/窗）。
@@ -52,7 +52,7 @@ from soft_match_test import SoftLoop, ALPHA, HITS_MIN
 warnings.filterwarnings("ignore")
 
 DEFAULT_OUT = os.path.join("vision", "out", "results")
-DL_DIR = r"C:\Users\fa278\Downloads"
+DL_DIR = r"C:\Users\<用户名>\Downloads"
 
 # 工作点（预注册，docs/248 §1.4，冻结；零重调）
 R_BASE_DAVIS = 0.2659          # DAVIS 校准集最近邻距离中位数（docs/245 §3.1）
@@ -61,9 +61,9 @@ TARGET_FRAMES = 500            # 每视频目标采样帧数（预注册 §1.3�
 
 # 野域视频选择（预注册，docs/248 §1.2，冻结；Get-ChildItem 候选 + 探针元数据）
 WILD_VIDEOS = [
-    ("V1", "studio_video_1759283839728.mp4"),
-    ("V2", "41125413122-1-192.mp4"),
-    ("V3", "\u5343\u519b\u4e07\u9a6c\u54e6\u54e6\u54e6.mp4"),  # 千军万马哦哦哦.mp4
+    ("V1", "<视频V1-studio脱敏>.mp4"),
+    ("V2", "<视频V2-B站编号脱敏>.mp4"),
+    ("V3", "\u5343\u519b\u4e07\u9a6c\u54e6\u54e6\u54e6.mp4"),  # <视频V3-内容脱敏>.mp4
 ]
 
 # 流定义（预注册，docs/248 §1.5，冻结）：(id, ascii_name, [video 索引])

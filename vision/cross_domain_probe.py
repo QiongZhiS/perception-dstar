@@ -12,22 +12,22 @@ import cv2
 # 候选（按 Get-ChildItem 清单预选；排除 2 个 4GB+ 直播回放：时长数小时、采样意义弱、解码
 # 成本高——如实声明排除理由）。中文文件名用 \u 转义保证源文件纯 ASCII。
 CANDIDATES = [
-    "studio_video_1759283839728.mp4",
+    "<视频V1-studio脱敏>.mp4",
     "769768098-1-208.mp4",
     "41251049012-1-192.mp4",
     "1408717315_qe1-1-192.mp4",
-    "41040086755-1-192.mp4",
-    "41125413122-1-192.mp4",
+    "<真实视频1-手机号脱敏>.mp4",
+    "<视频V2-B站编号脱敏>.mp4",
     "12345.mp4",
     "4.mp4",
     "\uff1f.mp4",                          # ?.mp4（全角问号）
-    "10\u670812\u65e5(1).mp4",             # 10月12日(1).mp4
-    "9\u67082\u65e5.mp4",                  # 9月2日.mp4
-    "\u5343\u519b\u4e07\u9a6c\u54e6\u54e6\u54e6.mp4",  # 千军万马哦哦哦.mp4
+    "10\u670812\u65e5(1).mp4",             # <日期文件名脱敏(1)>.mp4
+    "9\u67082\u65e5.mp4",                  # <日期文件名脱敏>.mp4
+    "\u5343\u519b\u4e07\u9a6c\u54e6\u54e6\u54e6.mp4",  # <视频V3-内容脱敏>.mp4
     "\u8fdc.mp4",                          # 远.mp4
     "\uff1f\uff1f.mp4",                    # ??.mp4
     "210\u4ee4.mp4",                       # 210令.mp4
-    "Desktop 2025.09.14 - 11.35.59.02.mp4",
+    "<桌面录制文件名脱敏>.mp4",
     "Desktop 2025.09.14 - 11.42.51.04.mp4",
 ]
 
@@ -46,7 +46,7 @@ def probe(path):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dir", default=r"C:\Users\fa278\Downloads")
+    ap.add_argument("--dir", default=r"C:\Users\<用户名>\Downloads")
     args = ap.parse_args()
     for i, name in enumerate(CANDIDATES):
         p = probe(args.dir + "\\" + name)

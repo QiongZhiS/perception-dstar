@@ -28,7 +28,7 @@ def parse_list(s):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--video", default=r"C:\Users\fa278\Downloads\41040086755-1-192.mp4")
+    ap.add_argument("--video", default=r"C:\Users\<用户名>\Downloads\<真实视频1-手机号脱敏>.mp4")
     ap.add_argument("--scale", type=float, default=0.5)
     ap.add_argument("--max-frames", type=int, default=3000)
     ap.add_argument("--grid", type=int, default=8)
