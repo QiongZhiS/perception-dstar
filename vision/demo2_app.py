@@ -95,6 +95,25 @@
     （suspicious 记账）→「我确认它了（任务色）」（claimed）→「它的颜色漂移了，
     带宽变宽了」（自适应带宽沉积）。
 
+7b. 光影面板（本升级：docs/265 真实域三分类诊断 + docs/270 计分制 + docs/272 自适应
+    DELTA 的演示形态；机制 import 复用实验脚本，零改写实验文件）
+  - 共享帧判别：compute_ref_dark（Pass A 适应，每流懒缓存）+ diagnose_frame 与
+    vision/light_shadow_real_test.py（诊断实验）**同一函数**（单源真值，零重调）；
+  - **计分制（docs/270 §1.3，import 复用 apply_fix）**：标签合成层
+    veto_count = v1+v4，object iff veto_count >= 2（V3 自指降为证据 E2，不再一票
+    否决）——替代旧的"V1∨V3∨V4 任一否决→object"硬链；
+  - **自适应 DELTA（docs/272 §1.3，import 复用 adaptive_delta）**：两遍法——
+    DELTA0 种子候选（diagnose_frame）→ 测候选内部亮度方差 var_inner → 运行时注入
+    DELTA_SHADOW = clamp(DELTA0 − K_ADAPT×var_inner/VAR_REF, DELTA_LO, DELTA_HI) →
+    同一条 diagnose_frame 重判（try/finally 恢复，测量层零改动）；
+  - 三分类标签：静态暗区=纹理/静态、时间门过+计分制（v1+v4≥2）=物体、否则=阴影；
+    候选高亮覆盖层（阴影=黄/物体=红/纹理=青，新增"光影候选"图层）；
+  - 门状态（V1 闭合轮廓 / V4 反射率跳变 = 计分否决 / V3 主轴方向 = 证据 E2 不否决）
+    + 证据门（E1/E2/E3）+ 自适应读数（delta_adaptive/var_inner/veto_count）+
+    会话累计三分类分布；面板诚实标注"真实视频无阴影 GT——行为读数（docs/265 诊断级
+    + docs/270/272 机制），非真实域证明"；
+  - 只读回路状态 + 独立判别，不进任何机制决策（DeferredLoop 与全部既有读数零改动）。
+
 8. 用法
   python vision/demo2_app.py --port 8081 --video flamingo
   python vision/demo2_app.py --selftest            # 机制冒烟（不启 HTTP）
@@ -137,6 +156,17 @@ from cross_domain_test import load_sampled_frames, WILD_VIDEOS, DL_DIR  # noqa: 
 from davis_suspicious import (  # noqa: E402
     DavisMind, load_video as load_davis_video, target_obs,
     bg_stats, bg_gain, TemporalGateDavis, circ,
+)
+# 光影面板机制复用（docs/265：与诊断实验共用同一帧判别函数，单源真值，零重调）
+from light_shadow_real_test import (  # noqa: E402
+    compute_ref_dark, diagnose_frame, circular_median,
+    ANCHOR_OVERLAP, LABEL_NONE, LABEL_OBJECT, LABEL_SHADOW, LABEL_TEXTURE,
+)
+# 光影面板机制复用（docs/270 计分制 + docs/272 自适应 DELTA；import 复用实验脚本，最小适配）
+import light_shadow_real_test as _lsr  # noqa: E402  （自适应运行时注入 DELTA_SHADOW）
+from light_shadow_recall_fix import apply_fix  # noqa: E402  （计分制：v1+v4≥2 判 object）
+from light_shadow_adaptive import (  # noqa: E402  （自适应 f：delta=clamp(DELTA0−K×var/VAR_REF,…)）
+    adaptive_delta, DELTA0, VAR_REF, K_ADAPT, DELTA_LO, DELTA_HI, EPS_DELTA,
 )
 
 # ---- 流定义 ----
@@ -223,6 +253,17 @@ class Demo2Engine:
         self._prev_claimed = False
         self._prev_bw = 0.0
         self._last_mad = None
+        # ---- 光影面板（docs/265：真实域三分类诊断的演示形态；只读、不进机制决策） ----
+        self.show_ls = True            # 图层：光影候选高亮（阴影=黄/物体=红/纹理=青）
+        self.ls_ref = {}               # 流名 -> ref_dark_log（Pass A 适应懒缓存）
+        self.ls_dark_prev = None       # 上一帧暗候选掩码（时间门历史；换流/回绕重置）
+        self.ls_prev_fi = None         # 循环回绕检测（fi < prev → 重置历史）
+        self.ls_acc = {                # 会话累计（跨视频保持，同 suspicious 精神）
+            "frames": 0, "cand": 0, "object": 0, "shadow": 0, "texture": 0,
+            "v1": 0, "v3": 0, "v4": 0, "e1": 0, "e2": 0, "e3": 0, "gate_n": 0,
+            "theta_vals": [], "delta_vals": [], "anchor": 0, "anchor_obj": 0,
+        }
+        self.ls_note = ""              # 面板诚实标注（野流无彩色 → V4/E3 不适用等）
 
     # ---------------- 流加载（懒加载；野流慢，DAVIS 快） ----------------
     def _load_stream(self, name):
@@ -310,8 +351,9 @@ class Demo2Engine:
         heat = cv2.applyColorMap((norm * 255).astype(np.uint8), cv2.COLORMAP_JET)
         return ev, heat, float(resid.mean())
 
-    def _build_scene(self, fi, gray, ev):
-        """场景合成（前端可切换图层）：原彩帧（或灰度）→ 事件掩码红叠 → GT 目标轮廓绿。
+    def _build_scene(self, fi, gray, ev, ls_overlay=None):
+        """场景合成（前端可切换图层）：原彩帧（或灰度）→ 事件掩码红叠 → GT 目标轮廓绿
+        → 光影候选高亮（阴影=黄/物体=红/纹理=青，docs/265）。
         显示分辨率 DISP_SIZE；机制仍吃灰度 160×120 不变。"""
         cc = self.streams_c.get(self.cur)
         if cc is not None and cc[0] and len(cc[0]) > 0:
@@ -334,6 +376,12 @@ class Demo2Engine:
                 cnts, _ = cv2.findContours(mk_disp, cv2.RETR_EXTERNAL,
                                            cv2.CHAIN_APPROX_SIMPLE)
                 cv2.drawContours(base, cnts, -1, (0, 255, 0), 2)   # GT 目标区轮廓
+        if self.show_ls and ls_overlay is not None:
+            ov = cv2.resize(ls_overlay, DISP_SIZE, interpolation=cv2.INTER_NEAREST)
+            m = ov.any(axis=2)
+            if m.any():
+                blended = cv2.addWeighted(base, 0.62, ov, 0.38, 0)   # 半透明候选高亮
+                base[m] = blended[m]
         return _jpeg(base)
 
     @staticmethod
@@ -627,10 +675,135 @@ class Demo2Engine:
         self._prev_bw = bw
         return utts[:2]
 
+    # ---------------- 光影三分类判别（docs/265 共享帧判别 + docs/270 计分制 + docs/272 自适应 DELTA） ----------------
+    def _ls_step(self, fi, gray):
+        """真实域"物体/纹理/阴影"三分类（docs/265 §1.3 语义 + docs/270 §1.3 计分制 +
+        docs/272 §1.3 自适应 DELTA）：
+        Pass A 适应懒缓存（每流一次）→ DELTA0 种子候选（diagnose_frame）→ 测候选内部
+        亮度方差 var_inner → 运行时注入自适应 DELTA → 同一条 diagnose_frame 重判
+        （try/finally 恢复，测量层零改动）→ apply_fix 计分制合成（v1+v4≥2 判 object，
+        V3 自指降为证据 E2 不否决）。
+        返回 (snap dict, overlay BGR or None)。只读回路状态 + 独立判别，不进机制决策。"""
+        frames = self.streams.get(self.cur)
+        if not frames:
+            return {}, None
+        if self.cur not in self.ls_ref:
+            self.ls_ref[self.cur] = compute_ref_dark(frames)
+        # 换流/循环回绕/场景剪切（R1 拼接内部 8 处真实场景切换）→ 重置时间门历史
+        # （fi 回退 = 换流/回绕；fi 命中 _cuts = R1 段切换：跨段 dark_prev 污染会
+        #  让新段的时间门 move<IoU → 误判 texture，docs/265 拼接流已知问题。
+        #  重置后从面积门重新开始（docs/260 冻结口径：t<K_MOVE 无历史→面积门生效））
+        if self.ls_prev_fi is not None and (fi < self.ls_prev_fi or fi in self._cuts):
+            self.ls_dark_prev = None
+        self.ls_prev_fi = fi
+        # 彩色帧（160×120 RGB 序——reflect_stats 契约；野流无彩色 → None → V4/E3 不适用）
+        rgb = None
+        cc = self.streams_c.get(self.cur)
+        if cc is not None and cc[0] and len(cc[0]) > 0:
+            bgr = cc[0][fi % len(cc[0])]
+            rgb = cv2.cvtColor(cv2.resize(bgr, RESIZE, interpolation=cv2.INTER_AREA),
+                               cv2.COLOR_BGR2RGB)
+        self.ls_note = ""
+        if cc is None or not cc[0]:
+            self.ls_note = "野流无彩色通道 → V4（反射率）/E3（连续）不适用，判别仅几何+时间门"
+
+        # ---- Pass 1（种子，DELTA0）：同一条 diagnose_frame，只读测量（docs/272 两遍法）----
+        d0 = diagnose_frame(gray, rgb, self.ls_ref[self.cur], self.ls_dark_prev)
+
+        # ---- 输入统计（docs/272 §1.3：候选内部亮度方差，从像素算；不进 GT/θ_est）----
+        L = np.log(np.maximum(gray.astype(np.float32), 1.0))
+        mask0 = d0["mask"]
+        if mask0.sum() > 0:
+            var_inner = float(np.var(L[mask0]))
+        else:
+            var_inner = float("nan")              # 无候选 → 不自适应（delta = DELTA0）
+        delta_adapt = adaptive_delta(var_inner)
+
+        # ---- Pass 2（自适应）：运行时注入 DELTA_SHADOW，同一条 diagnose_frame 重判 ----
+        if abs(delta_adapt - DELTA0) < EPS_DELTA:
+            d = d0                                # 退化情形（var_inner≈0）：等价 DELTA0
+        else:
+            _old = _lsr.DELTA_SHADOW
+            try:
+                _lsr.DELTA_SHADOW = delta_adapt
+                d = diagnose_frame(gray, rgb, self.ls_ref[self.cur], self.ls_dark_prev)
+            finally:
+                _lsr.DELTA_SHADOW = _old
+        self.ls_dark_prev = d0["mask"]            # 时间门历史保持 DELTA0 语义（种子候选）
+
+        # ---- 标签合成（docs/270 §1.3：计分制 veto_count=v1+v4；object iff ≥2；V3 降证据 E2）----
+        lab = apply_fix(d["label"], d["v1"], d["v3"], d["v4"])
+        veto_count = int(bool(d["v1"])) + int(bool(d["v4"]))
+
+        acc = self.ls_acc
+        acc["frames"] += 1
+        if lab != LABEL_NONE:
+            acc["cand"] += 1
+            acc[lab] += 1
+        if lab in (LABEL_OBJECT, LABEL_SHADOW):        # 时间门过 → 否决/证据链行使
+            acc["gate_n"] += 1
+            for k in ("v1", "v3", "v4", "e1", "e2", "e3"):
+                if d[k] is True:
+                    acc[k] += 1
+            if d["theta_est"] is not None:
+                acc["theta_vals"].append(d["theta_est"])
+            acc["delta_vals"].append(delta_adapt)     # 会话自适应 DELTA 分布（报告性）
+        # GT 锚（docs/265 C1 口径的演示累计；掩码存在时）
+        if lab != LABEL_NONE and cc is not None and cc[1] is not None and len(cc[1]) > 0:
+            gt = cv2.resize(cc[1][fi % len(cc[1])], RESIZE,
+                            interpolation=cv2.INTER_NEAREST) > 0
+            if gt.any():
+                ov = float(np.logical_and(d["mask"], gt).sum()) / max(1.0, float(d["mask"].sum()))
+                if ov >= ANCHOR_OVERLAP and d["active"]:
+                    acc["anchor"] += 1
+                    if lab == LABEL_OBJECT:
+                        acc["anchor_obj"] += 1
+        # 候选高亮覆盖层（阴影=黄 / 物体=红 / 纹理=青；按计分制标签着色）
+        overlay = None
+        if self.show_ls and lab != LABEL_NONE:
+            overlay = np.zeros((RESIZE[1], RESIZE[0], 3), np.uint8)
+            overlay[d["mask"]] = {
+                LABEL_OBJECT: (0, 0, 255), LABEL_SHADOW: (0, 215, 255),
+                LABEL_TEXTURE: (255, 200, 0)}[lab]
+        theta_med = circular_median(acc["theta_vals"]) if acc["theta_vals"] else None
+        dv = acc["delta_vals"]
+        snap = {
+            "label": lab,
+            "label_seed": d0["label"],
+            "area": int(d["area"]),
+            "active": bool(d["active"]),
+            "gates": {"v1": bool(d["v1"]), "v3": bool(d["v3"]), "v4": bool(d["v4"]),
+                      "e1": bool(d["e1"]),
+                      "e2": None if d["e2"] is None else bool(d["e2"]),
+                      "e3": None if d["e3"] is None else bool(d["e3"])},
+            "veto_count": veto_count,
+            "delta_adaptive": round(float(delta_adapt), 4),
+            "var_inner": None if var_inner != var_inner else round(float(var_inner), 6),
+            "theta_est": None if d["theta_est"] is None else round(float(d["theta_est"]), 2),
+            "dh": None if d["dh"] is None else round(float(d["dh"]), 2),
+            "ds": None if d["ds"] is None else round(float(d["ds"]), 2),
+            "move": None if d["move"] is None else round(float(d["move"]), 4),
+            "acc": {k: int(v) for k, v in acc.items()
+                    if k not in ("theta_vals", "delta_vals")},
+            "delta_min": round(float(min(dv)), 4) if dv else None,
+            "delta_max": round(float(max(dv)), 4) if dv else None,
+            "theta_med": None if theta_med != theta_med else round(float(theta_med), 2),
+            "anchor": int(acc["anchor"]), "anchor_obj": int(acc["anchor_obj"]),
+            "mech": {
+                "scoring": "veto_count = v1+v4; object iff veto_count >= 2 (V3=E2 evidence)",
+                "adaptive": "delta = clamp(DELTA0 - K_ADAPT*var_inner/VAR_REF, DELTA_LO, DELTA_HI)",
+                "delta0": DELTA0, "var_ref": VAR_REF, "k_adapt": K_ADAPT,
+                "delta_lo": DELTA_LO, "delta_hi": DELTA_HI,
+            },
+            "note": self.ls_note,
+        }
+        return snap, overlay
+
     # ---------------- 每帧快照（画面） ----------------
     def _update_frame(self, gray, res, fi):
         ev, heat, resid_mean = self._display_views(gray, res)
-        scene = self._build_scene(fi, gray, ev)
+        ls_snap, ls_overlay = self._ls_step(fi, gray)     # 光影三分类（docs/265）
+        scene = self._build_scene(fi, gray, ev, ls_overlay)
         color_snap, color_lang = self._color_step(fi)
         frames = self.streams.get(self.cur)
         total = len(frames) if frames else 0
@@ -642,6 +815,7 @@ class Demo2Engine:
             self.snap["win_inflight"] = len(self.loop._frame_buf)
             self.snap["resid_mean"] = round(resid_mean, 6)
             self.snap.update(color_snap)
+            self.snap["lightshadow"] = ls_snap
             if color_lang:
                 self.lang_log.extend(color_lang)
                 if len(self.lang_log) > LOG_MAX:
@@ -713,6 +887,8 @@ class Demo2Engine:
                     self.idx = 0            # 机制不重置（A1 连续性）：仅换流位置
                     self._cuts = set()      # 新流的剪切位置由加载时重建
                     self._wb_reset = True   # 场景切换 → 白平衡基线重标定（机制线程内）
+                    self.ls_dark_prev = None   # 光影时间门历史重置（Pass A 适应按流缓存保留）
+                    self.ls_prev_fi = None
             elif action == "task=flamingo" or action == "task=surf":
                 preset = action.split("=", 1)[1]
                 self.task_hue, self.task_thr, self.task_preset = TASK_PRESETS[preset]
@@ -729,6 +905,7 @@ class Demo2Engine:
                 self.show_color = "color" in parts
                 self.show_event = "event" in parts
                 self.show_gt = "gt" in parts
+                self.show_ls = "light" in parts
         return {"ok": True, "action": action}
 
     def _reset_mem(self):
@@ -748,13 +925,20 @@ class Demo2Engine:
         self._prev_claimed = False
         self._prev_bw = 0.0
         self._prev_fi = None
+        self.ls_dark_prev = None
+        self.ls_prev_fi = None
+        self.ls_ref = {}
+        self.ls_acc = {"frames": 0, "cand": 0, "object": 0, "shadow": 0, "texture": 0,
+                       "v1": 0, "v3": 0, "v4": 0, "e1": 0, "e2": 0, "e3": 0, "gate_n": 0,
+                       "theta_vals": [], "delta_vals": [], "anchor": 0, "anchor_obj": 0}
         for k in ("win", "E", "U", "mae_last", "mae_series", "q1", "q4", "ratio",
                   "ratio_n", "theta", "db", "sc1_fast", "sc2_slow", "sc1_slow",
                   "n_promo", "n_recycle", "density_bound", "density_ok", "protos",
                   "n_fast", "n_slow", "events", "lang", "matched", "gate",
                   "has_mask", "task_hue", "task_preset", "frac", "hue", "color_dist",
                   "thr", "bw", "k", "trusted", "consec", "persist", "rej_total",
-                  "ok", "claimed", "suspicious", "wb", "note", "thumb_img"):
+                  "ok", "claimed", "suspicious", "wb", "note", "thumb_img",
+                  "lightshadow"):
             self.snap.pop(k, None)
 
     # ---------------- 快照（HTTP 线程读；条目均为新鲜对象） ----------------
@@ -775,7 +959,7 @@ class Demo2Engine:
             "streams": STREAM_LABELS,
             "window": WINDOW,
             "layers": {"color": self.show_color, "event": self.show_event,
-                       "gt": self.show_gt},
+                       "gt": self.show_gt, "light": self.show_ls},
             "task_hue": round(float(self.task_hue), 2),
             "task_preset": self.task_preset,
             "knobs": {
@@ -863,8 +1047,51 @@ def selftest():
     print("D2_SELFTEST_SUSPICIOUS_STRUCT=%d" % int(c_susp_n > 0))
     print("D2_SELFTEST_SUSPICIOUS_N=%d" % c_susp_n)
     print("D2_SELFTEST_COLOR_OK=%d" % c_ok)
+
+    # ---- 光影三分类自检（docs/265：共享帧判别在真实流上运行；标签合法 + 确定性） ----
+    ls_ok = 0
+    ls_label = ""
+    try:
+        fr0 = load_video_frames("flamingo")
+        ref0 = compute_ref_dark(fr0)
+        _cfr0, _cmk0 = load_davis_video("flamingo")
+        rgb0 = cv2.cvtColor(cv2.resize(_cfr0[0], RESIZE, interpolation=cv2.INTER_AREA),
+                            cv2.COLOR_BGR2RGB)
+        d1 = diagnose_frame(fr0[0], rgb0, ref0, None)
+        d2 = diagnose_frame(fr0[0], rgb0, ref0, None)
+        ok_lab = d1["label"] in (LABEL_NONE, LABEL_OBJECT, LABEL_SHADOW, LABEL_TEXTURE)
+        ok_det = (d1["label"] == d2["label"] and d1["v1"] == d2["v1"]
+                  and d1["v3"] == d2["v3"] and d1["v4"] == d2["v4"])
+        ls_label = d1["label"]
+        ls_ok = int(ok_lab and ok_det)
+    except Exception as e:  # noqa: BLE001
+        print("D2_SELFTEST_LS_ERROR=%s" % str(e)[:120])
+    print("D2_SELFTEST_LS_OK=%d" % ls_ok)
+    print("D2_SELFTEST_LS_LABEL=%s" % ls_label)
+
+    # ---- 光影新机制自检（docs/270 计分制 + docs/272 自适应 f；import 复用冒烟） ----
+    mech_ok = 0
+    try:
+        from light_shadow_recall_fix import apply_fix as _af
+        from light_shadow_adaptive import (adaptive_delta as _ad, DELTA0 as _D0,
+                                           VAR_REF as _VR, K_ADAPT as _KA,
+                                           DELTA_LO as _DL, DELTA_HI as _DH)
+        o_single = _af(LABEL_OBJECT, True, True, False)   # v1 单独 → 计分 1 < 2 → shadow
+        o_double = _af(LABEL_OBJECT, True, False, True)   # v1+v4 → 计分 2 → object
+        o_v4only = _af(LABEL_OBJECT, False, True, True)   # v4 单独 → shadow
+        o_none = _af(LABEL_NONE, True, True, True)        # 非 object/shadow 原样保留
+        d_lo = _ad(1e6)                                    # 方差爆炸 → DELTA_LO
+        d_hi = _ad(0.0)                                    # 方差 0 → DELTA0
+        d_ref = _ad(_VR)                                   # 完整半影 → DELTA0−K_ADAPT
+        mech_ok = int(o_single == LABEL_SHADOW and o_double == LABEL_OBJECT
+                      and o_v4only == LABEL_SHADOW and o_none == LABEL_NONE
+                      and abs(d_lo - _DL) <= 1e-12 and abs(d_hi - _D0) <= 1e-12
+                      and abs(d_ref - (_D0 - _KA)) <= 1e-12)
+    except Exception as e:  # noqa: BLE001
+        print("D2_SELFTEST_LS_MECH_ERROR=%s" % str(e)[:120])
+    print("D2_SELFTEST_LS_MECH_OK=%d" % mech_ok)
     print("D2_SELFTEST_ELAPSED=%.2f" % (time.time() - t0))
-    return 0 if (ok and c_ok) else 1
+    return 0 if (ok and c_ok and ls_ok and mech_ok) else 1
 
 
 # ---------------- 前端页面（内嵌 HTML/JS，中文标注） ----------------
@@ -948,6 +1175,7 @@ A1 动态基质（docs/257）→ 语言转录（docs/204）｜真实输入：DAV
       <label class="layerlabel"><input type="checkbox" id="ly_color" checked> 原彩帧</label>
       <label class="layerlabel"><input type="checkbox" id="ly_event" checked> 事件掩码</label>
       <label class="layerlabel"><input type="checkbox" id="ly_gt" checked> GT 目标轮廓</label>
+      <label class="layerlabel"><input type="checkbox" id="ly_light" checked> 光影候选</label>
       <span id="masknote" style="color:#f97"></span>
     </div>
     <div style="margin-top:8px">
@@ -979,6 +1207,15 @@ A1 动态基质（docs/257）→ 语言转录（docs/204）｜真实输入：DAV
     <div class="huebar" id="huebar"><div class="marker" id="huemark"></div></div>
     <h4>suspicious 色相表 — 被拒色相记账（docs/205，跨遍保留）</h4>
     <div id="susptable"></div>
+  </div>
+  <div class="panel" style="min-width:340px">
+    <h3>光影面板 — 物体 / 纹理 / 阴影（docs/265 三分类 + 270 计分制 + 272 自适应 DELTA）</h3>
+    <div class="stat" id="lsstate"></div>
+    <h4>门状态（本帧 · 触发 / 未触发 / 不适用 · V3 已降为证据 E2，不否决）</h4>
+    <div class="stat" id="lsgates"></div>
+    <h4>累计三分类（候选帧占比 · 会话累计，跨视频保持）</h4>
+    <div id="lsbar"></div>
+    <div class="stat" id="lsnote" style="color:#f97;font-size:11px;margin-top:4px"></div>
   </div>
 </div>
 <div class="row" style="margin-top:14px">
@@ -1092,7 +1329,9 @@ function render(s){
   $('ly_color').checked = !s.layers || s.layers.color;
   $('ly_event').checked = !s.layers || s.layers.event;
   $('ly_gt').checked    = !s.layers || s.layers.gt;
+  $('ly_light').checked = !s.layers || s.layers.light;
   renderColor(s);
+  renderLightShadow(s);
   drawCurve(s.mae_series);
   $('playbtn').textContent = s.playing ? '暂停' : '播放';
   $('playbtn').classList.toggle('active', !s.playing);
@@ -1156,6 +1395,83 @@ function renderColor(s){
   $('huemark').style.left = (th / 180 * 100) + '%';
 }
 
+// 光影面板（docs/265 三分类 + docs/270 计分制 + docs/272 自适应 DELTA；每行 1:1 指回 /state）
+function clsChip(lab){
+  if (lab === 'object') return '<span style="color:#f77">物体</span>';
+  if (lab === 'shadow') return '<span style="color:#ff9">阴影</span>';
+  if (lab === 'texture') return '<span style="color:#9cf">纹理/静态</span>';
+  return '<span style="color:#666">无暗候选</span>';
+}
+function gateTxt(v){
+  if (v === true) return '<span class="no">触发</span>';
+  if (v === false) return '<span class="ok">未触发</span>';
+  return '<span style="color:#888">不适用</span>';
+}
+function renderLightShadow(s){
+  const ls = s.lightshadow || {};
+  const g = ls.gates || {};
+  const acc = ls.acc || {};
+  const mech = ls.mech || {};
+  const n = acc.cand || 0;
+  const deltaRng = '[' + (mech.delta_lo !== undefined ? fmt1(mech.delta_lo) : '0.250') +
+                   ', ' + (mech.delta_hi !== undefined ? fmt1(mech.delta_hi) : '0.350') + ']';
+  const vc = (ls.veto_count === null || ls.veto_count === undefined) ? '—' : ls.veto_count;
+  const vcTxt = (ls.label === 'object') ? '<span class="no">object（≥2）</span>'
+               : (ls.label === 'shadow') ? '<span class="ok">shadow（&lt;2）</span>' : '—';
+  const row = [
+    ['本帧三分类（计分制 v1+v4≥2，docs/270）', (ls.label ? clsChip(ls.label) : '—') +
+      '（候选 ' + (ls.area || 0) + 'px' + (ls.active ? ' · 时间门过' : '') + '）'],
+    ['计分制状态（veto_count = v1+v4 ≥ 2 才判物体）', 'v1=' + (g.v1 ? 1 : 0) +
+      ' + v4=' + (g.v4 ? 1 : 0) + ' = ' + vc + ' → ' + vcTxt +
+      '（V3 已降为证据 E2，不参与否决）'],
+    ['自适应 DELTA_SHADOW（docs/272 f(var_inner)）', fmt1(ls.delta_adaptive) +
+      '（范围 ' + deltaRng +
+      (ls.delta_min !== null && ls.delta_min !== undefined
+        ? '；会话 min/max ' + fmt1(ls.delta_min) + '/' + fmt1(ls.delta_max) : '') + '）'],
+    ['候选内部亮度方差 var_inner（软/硬阴影签名）',
+      (ls.var_inner === null || ls.var_inner === undefined) ? '—（无候选）'
+        : Number(ls.var_inner).toFixed(6)],
+    ['光照方向 θ_est（帧内估计，无 GT）', (ls.theta_est === null || ls.theta_est === undefined)
+      ? '—（无亮候选）' : fmt1(ls.theta_est) + '°（累计中位 ' + fmt1(ls.theta_med) + '°）'],
+    ['反射率 ΔH / ΔS（V4/E3 载体）', (ls.dh === null || ls.dh === undefined)
+      ? '—（不适用）' : fmt1(ls.dh) + '° / ' + fmt1(ls.ds)],
+    ['帧间移动 1−IoU（时间门 ≥0.05）', (ls.move === null || ls.move === undefined)
+      ? '—（无历史）' : fmt1(ls.move)],
+    ['GT 锚累计（候选≥30%落目标，docs/265 C1 口径）', (acc.anchor || 0) + ' 帧 / 判物体 ' +
+      (acc.anchor_obj || 0) + ' 帧'],
+  ];
+  $('lsstate').innerHTML = '<table>' + row.map(([k, v]) =>
+    '<tr><td style="color:#999">' + k + '</td><td>' + v + '</td></tr>').join('') + '</table>';
+  const gt = [
+    ['V1 闭合轮廓（否决线索 · 计分 1）', g.v1],
+    ['V3 主轴方向（已降级：证据 E2，不否决，docs/270）', g.v3],
+    ['V4 反射率跳变（否决线索 · 计分 1）', g.v4],
+    ['E1 开放拓扑', g.e1],
+    ['E2 主轴沿光照（V3 证据位）', g.e2],
+    ['E3 反射率连续', g.e3],
+  ];
+  $('lsgates').innerHTML = '<table>' + gt.map(([k, v]) =>
+    '<tr><td style="color:#999">' + k + '</td><td>' + gateTxt(v) + '</td></tr>').join('') + '</table>';
+  const parts = [['物体', acc.object || 0, '#f77'], ['阴影', acc.shadow || 0, '#ff9'],
+                 ['纹理', acc.texture || 0, '#9cf']];
+  const maxc = Math.max(1, acc.object || 0, acc.shadow || 0, acc.texture || 0);
+  $('lsbar').innerHTML = n
+    ? '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">' +
+      parts.map(([k, v, c]) =>
+        '<span style="color:' + c + ';font-size:12px">' + k + ' ' +
+        (100.0 * v / n).toFixed(0) + '%</span><span style="height:10px;width:' +
+        Math.max(2, 90 * v / maxc) + 'px;background:' + c +
+        ';border-radius:2px;display:inline-block"></span>').join('') + '</div>' +
+      '<div class="stat" style="color:#666;margin-top:2px">累计候选帧 ' + n + ' / ' +
+      (acc.frames || 0) + ' 帧（' + (acc.frames ? (100.0 * n / acc.frames).toFixed(0) : 0) + '%）' +
+      '｜计分否决 V1/V4 触发=' + (acc.v1 || 0) + '/' + (acc.v4 || 0) +
+      '（V3 仅证据：' + (acc.v3 || 0) + '）</div>'
+    : '<div class="stat" style="color:#666">（尚无暗候选——适应参考吸收中）</div>';
+  $('lsnote').textContent = '诚实标注：真实视频无阴影 GT、无光照 GT——本面板是判别机制的行为读数' +
+    '（docs/265 诊断级 + docs/270 计分制 + docs/272 自适应 DELTA），不是真实域证明。' +
+    (ls.note ? '；' + ls.note : '');
+}
+
 async function tick(){
   try {
     const r = await fetch('/state');
@@ -1171,17 +1487,19 @@ $('stepbtn').onclick = () => act('step');
 $('resetbtn').onclick = () => { if (confirm('清空记忆并重新开始？')) act('reset'); };
 document.querySelectorAll('.spd').forEach(b => b.onclick = () => act('speed' + b.dataset.s));
 
-// 图层切换（原彩帧 / 事件掩码 / GT 目标轮廓）
+// 图层切换（原彩帧 / 事件掩码 / GT 目标轮廓 / 光影候选）
 function sendLayers(){
   const parts = [];
   if ($('ly_color').checked) parts.push('color');
   if ($('ly_event').checked) parts.push('event');
   if ($('ly_gt').checked) parts.push('gt');
+  if ($('ly_light').checked) parts.push('light');
   act('layers=' + parts.join(','));
 }
 $('ly_color').onchange = sendLayers;
 $('ly_event').onchange = sendLayers;
 $('ly_gt').onchange = sendLayers;
+$('ly_light').onchange = sendLayers;
 
 // 任务色相（外赋利害 docs/188；跨视频保持）
 document.querySelectorAll('.taskbtn').forEach(b => b.onclick = () => act('task=' + b.dataset.task));
